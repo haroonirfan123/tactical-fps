@@ -81,10 +81,11 @@ func _refresh_live() -> void:
 		return
 
 	var position := _player.global_position
-	_player_label.text = "%s\nx %6.2f   y %6.2f   z %6.2f\n%s" % [
+	_player_label.text = "%s\nx %6.2f   y %6.2f   z %6.2f\n%s\n%s" % [
 		Player.state_name(_player.get_movement_state()),
 		position.x, position.y, position.z,
 		_player.debug_line(),
+		_player.debug_line_combat(),
 	]
 
 
