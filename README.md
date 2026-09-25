@@ -416,16 +416,26 @@ surface is also flush with `y = 0`, for the same reason.
 
 Each chapter builds on the last.
 
-- [x] **Ch. 1 — Foundation:** project structure, conventions, version control,
-      phase state machine, autoloads, data resources, boot scene, debug overlay
-- [x] **Ch. 2 — Player controller & input:** input map, movement, camera, collision
-- [ ] **Ch. 3 — Weapons & combat:** firing, ballistics, damage, hit feedback
-- [ ] **Ch. 4 — Multiplayer:** player replication, teams, lobby, sync
-- [ ] **Ch. 5 — Round system:** buy phase, live round, score, win conditions
-- [ ] **Ch. 6 — Abilities:** original agent abilities and gadgets
-- [ ] **Ch. 7 — Map & level design:** original map, layout, spawns, cover
-- [ ] **Ch. 8 — UI, art & audio:** HUD, menus, identity, VFX, sound
-- [ ] **Ch. 9 — Testing & ship:** optimisation, balance, final export build
+- [x] **Ch. 1 — Foundation & Project Architecture:** project structure, conventions,
+      version control, phase state machine, autoloads, data resources, boot
+      scene, debug overlay
+- [x] **Ch. 2 — FPS Player Controller:** input map, movement, camera, jumping,
+      sprinting, crouching
+- [ ] **Ch. 3 — Weapons & Combat:** guns, shooting, damage, health, headshots,
+      reloads
+- [ ] **Ch. 4 — 3v3 Multiplayer:** networking, players, synchronization, teams
+- [ ] **Ch. 5 — Tactical Round System:** rounds, objectives, timers, victory
+      conditions
+- [ ] **Ch. 6 — Unique Game Mechanics:** original abilities/gadgets that make
+      the game stand out
+- [ ] **Ch. 7 — Map & Level Design:** the actual 3v3 map, sites, cover, spawns,
+      layout
+- [ ] **Ch. 8 — UI & Presentation:** HUD, menus, scoreboard, buy screen, round
+      UI
+- [ ] **Ch. 9 — Art, Audio & Polish:** models, VFX, sounds, animations, visual
+      identity
+- [ ] **Ch. 10 — Testing, Optimization & Final Build:** multiplayer testing,
+      bug fixing, optimization, packaging/submission
 
 ### Carried forward from Chapter 1
 
