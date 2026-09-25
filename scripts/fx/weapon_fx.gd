@@ -27,6 +27,7 @@ extends Node3D
 @export var max_impact_distance: float = 100.0
 
 @onready var _weapon: Weapon = get_parent().get_node_or_null(^"Weapon") as Weapon
+@onready var _player: Player = get_parent().get_parent() as Player
 
 ## Impacts alive at once. A full automatic burst is seven or eight rounds a
 ## second, and each effect is meant to last a fifth of that, so the cap is
@@ -43,9 +44,31 @@ func _ready() -> void:
 		return
 	_weapon.impact_requested.connect(_on_impact_requested)
 
+	# Chapter 4: when this machine is not the one that resolved the shot, the
+	# impact arrives as a verdict from the host rather than as this weapon's own
+	# signal. Without this connection an online client's shots would produce no
+	# visible hit at all - the muzzle flash comes from the local trigger, but
+	# the impact comes from the authority, and only the authority's raycast ever
+	# ran.
+	if _player != null:
+		_player.shot_resolved.connect(_on_shot_resolved)
+
 
 func _on_impact_requested(at: Vector3, normal: Vector3, zone: int) -> void:
+	_spawn_impact(at, normal, zone)
+
+
+## The one place an impact actually gets drawn, shared by the local
+## weapon's own signal and the network's verdict.
+##
+## Refuses anything further than [member max_impact_distance] from this
+## player's eye. A round that travelled the weapon's whole range is fine; a
+## point 400 m away came from either a wrong origin or a node that has since
+## been freed, and neither is worth filling the screen with.
+func _spawn_impact(at: Vector3, normal: Vector3, zone: int) -> void:
 	if impact_scene == null or _live >= MAX_LIVE_EFFECTS:
+		return
+	if _player != null and _player.get_eye_position().distance_to(at) > max_impact_distance:
 		return
 
 	var effect := impact_scene.instantiate() as ImpactEffect
@@ -64,3 +87,19 @@ func _on_impact_requested(at: Vector3, normal: Vector3, zone: int) -> void:
 
 func _on_effect_freed() -> void:
 	_live = maxi(0, _live - 1)
+
+
+## Draws an impact the network told us about rather than one this weapon found.
+##
+## The host broadcasts the point, the surface normal and the zone - the three
+## things a spark needs and nothing more. No damage, no hit point precision, no
+## "what did I hit" reconstruction: the client is not being asked to agree with
+## the host about ballistics, only to show that something happened.
+func _on_shot_resolved(at: Vector3, normal: Vector3, _victim: Player, zone: int, _killed: bool, is_local: bool) -> void:
+	if is_local:
+		# This machine's own shot, already drawn from the weapon's own signal on
+		# whichever machine ran the raycast - here if we are the authority,
+		# arriving as a verdict if we are not. Drawing it again would put two
+		# effects on the same square centimetre.
+		return
+	_spawn_impact(at, normal, zone)

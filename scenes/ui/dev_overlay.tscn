@@ -96,6 +96,11 @@ layout_mode = 2
 horizontal_alignment = 1
 autowrap_mode = 3
 
+[node name="RosterLabel" type="Label" parent="Panel/Margin/Column"]
+unique_name_in_owner = true
+layout_mode = 2
+horizontal_alignment = 1
+
 [node name="RulesLabel" type="Label" parent="Panel/Margin/Column"]
 unique_name_in_owner = true
 layout_mode = 2

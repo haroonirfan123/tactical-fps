@@ -23,14 +23,31 @@ const DEV_OVERLAY_ENABLED := true
 
 const DEV_OVERLAY := preload("res://scenes/ui/dev_overlay.tscn")
 
-## Chapter 2 boots straight into the playtest, because there is no real game to
-## go to yet: no lobby, no team select, nothing to choose. The main menu still
-## exists and still works, it is simply not the front door for now.
+## Chapter 4's development lobby: Host, Join, Leave, a roster and a status
+## line. Behind its own flag for the same reason as the overlay - it is the one
+## piece of Chapter 4 a shipped build must not carry, and it should be removable
+## without touching the router or the match scene.
 ##
-## This is the whole of the temporary arrangement. Set it to false and the game
-## opens on the Chapter 1 main menu again; Chapter 4 does exactly that, once
-## there is a real lobby worth entering.
-const BOOT_INTO_PLAYTEST := true
+## Deleted entirely in Chapter 8, when a real lobby with team select replaces
+## it. Nothing in [NetworkManager] depends on it; it depends on
+## [NetworkManager], which is the correct direction for a dev tool.
+const DEV_NETWORK_UI_ENABLED := true
+
+const DEV_NETWORK_UI := preload("res://scenes/ui/dev_network_ui.tscn")
+
+## Whether the game opens on the playtest or on the main menu.
+##
+## [b]Chapter 4 set this to false.[/b] Chapters 2 and 3 booted straight into the
+## playtest because there was nothing to choose and a Host / Join button led
+## nowhere - no second player could appear, so pressing it was strictly worse
+## than skipping it. That stopped being true the moment networked spawning
+## worked: the main menu's Host and Join are now the real front door, and hiding
+## them would have made the chapter's headline feature something you had to know
+## to go and find in a corner of the screen.
+##
+## Set it to true and the menu is bypassed again, which is occasionally useful
+## for working on movement or weapon feel without going through two screens.
+const BOOT_INTO_PLAYTEST := false
 
 ## Phase -> screen scene. Phases with no entry fall through to the debug
 ## overlay plus the placeholder arena, which is correct for every phase until
@@ -71,6 +88,12 @@ var _current_screen_scene: PackedScene = null
 ## Null when [constant DEV_OVERLAY_ENABLED] is false.
 var _dev_overlay: CanvasLayer = null
 
+## Null when [constant DEV_NETWORK_UI_ENABLED] is false. Held so it is created
+## once and lives for the whole session rather than being re-instanced every
+## time the phase routes to a different screen - a lobby that vanished on every
+## round change would be a lobby you could not use to debug a round change.
+var _dev_network_ui: CanvasLayer = null
+
 
 func _ready() -> void:
 	GameManager.state_changed.connect(_on_state_changed)
@@ -80,6 +103,10 @@ func _ready() -> void:
 		# Assigned before adding, so the overlay's _ready can already read it.
 		_dev_overlay.screen_host = _screen_host
 		add_child(_dev_overlay)
+
+	if DEV_NETWORK_UI_ENABLED:
+		_dev_network_ui = DEV_NETWORK_UI.instantiate()
+		add_child(_dev_network_ui)
 
 	# Done before the first render below, so the main menu is never even
 	# instantiated on the way into the playtest. GameManager has already run
@@ -149,3 +176,12 @@ func _apply_screen_mode(phase: int) -> void:
 
 	if _dev_overlay != null:
 		_dev_overlay.visible = not SCREENS_WITHOUT_OVERLAY.has(phase)
+
+	# The network panel is hidden on the main menu for a different reason from
+	# the overlay: the menu already has Host and Join, so showing both would
+	# give the player two identical-looking buttons pointing at two different
+	# places, and pressing the wrong one first would be baffling. The panel is
+	# for a session that is already running and wants a Leave button and a
+	# roster, neither of which the menu has room for.
+	if _dev_network_ui != null:
+		_dev_network_ui.visible = phase != GamePhase.Phase.MAIN_MENU

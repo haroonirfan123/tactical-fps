@@ -25,15 +25,35 @@ func _ready() -> void:
 
 	%HostButton.pressed.connect(_on_host_pressed)
 	%JoinButton.pressed.connect(_on_join_pressed)
+	%OfflineButton.pressed.connect(_on_offline_pressed)
 	%QuitButton.pressed.connect(_on_quit_pressed)
 
 	_address_edit.text = NetworkManager.DEFAULT_ADDRESS
 	_status_label.text = ""
 
 
+## Single-player, no session at all.
+##
+## Not an afterthought. The offline path is the one every automated Chapter 2
+## and Chapter 3 test runs through, and it is also the fastest way to work on
+## movement or weapon feel without a second instance to keep alive. It was a
+## second button in Chapter 1 but became unreachable once Chapter 2 booted
+## straight into the playtest; with the menu as the front door again, it needs
+## to be back.
+##
+## Any existing session is left first, so pressing this after a failed join
+## does not drop you into a lobby with a stale peer underneath.
+func _on_offline_pressed() -> void:
+	if NetworkManager.is_online:
+		NetworkManager.leave_game()
+	GameManager.change_state(GamePhase.Phase.LOBBY)
+
+
 func _on_host_pressed() -> void:
 	# A host is connected the instant create_server() succeeds, so the lobby
 	# can be entered straight away.
+	if NetworkManager.is_online:
+		NetworkManager.leave_game()
 	var error := NetworkManager.host_game()
 	if error != OK:
 		_status_label.text = "Could not host: %s" % error_string(error)
@@ -45,6 +65,9 @@ func _on_join_pressed() -> void:
 	var address := _address_edit.text.strip_edges()
 	if address.is_empty():
 		address = NetworkManager.DEFAULT_ADDRESS
+
+	if NetworkManager.is_online:
+		NetworkManager.leave_game()
 
 	_status_label.text = "Connecting to %s..." % address
 	_awaiting_join = true

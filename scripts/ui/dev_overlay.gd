@@ -36,6 +36,7 @@ var screen_host: Node = null
 @onready var _note_label: Label = %NoteLabel
 @onready var _scene_label: Label = %SceneLabel
 @onready var _net_label: Label = %NetLabel
+@onready var _roster_label: Label = %RosterLabel
 @onready var _rules_label: Label = %RulesLabel
 @onready var _score_label: Label = %ScoreLabel
 @onready var _player_label: Label = %PlayerLabel
@@ -55,6 +56,7 @@ func _ready() -> void:
 	GameManager.state_changed.connect(_on_state_changed)
 	EventBus.player_joined.connect(_on_player_joined)
 	EventBus.player_left.connect(_on_player_left)
+	NetworkManager.roster_updated.connect(_refresh_network)
 
 	# The game is already in a phase by the time this loads, so render once
 	# here instead of only reacting to future changes.
@@ -75,7 +77,16 @@ func _refresh_live() -> void:
 		get_tree().get_nodes_in_group(&"players").size(),
 	]
 
-	_player = get_tree().get_first_node_in_group(&"players") as Player
+	# The player this machine drives, not merely the first one in the tree.
+	#
+	# Chapter 2 could use "first node in the players group" because there was
+	# exactly one. Chapter 4 cannot: the group holds up to six bodies and the
+	# one the overlay reports has to be the one this machine is looking through
+	# the camera of, or the position and movement state on screen describe
+	# somebody else entirely.
+	_player = NetworkManager.get_local_player()
+	if _player == null:
+		_player = get_tree().get_first_node_in_group(&"players") as Player
 	if _player == null:
 		_player_label.text = "No player in the scene."
 		return
@@ -137,6 +148,11 @@ func _refresh_network() -> void:
 		NetworkManager.get_max_players(),
 		NetworkManager.local_peer_id,
 	]
+
+	# The roster, one line per peer. On a client this is the host's list, which
+	# is the point: a client that reported only its own view would report one
+	# player and look like a working session with nobody in it.
+	_roster_label.text = "\n".join(NetworkManager.players.summary_lines())
 
 
 func _on_state_changed(_previous: int, current: int) -> void:

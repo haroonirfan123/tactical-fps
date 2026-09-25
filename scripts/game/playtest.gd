@@ -1,38 +1,160 @@
 class_name Playtest
 extends Node3D
-## The screen shown while there is no real game to get into: the grey box with
-## one controllable player in it.
+## The screen shown while there is no real match to get into: the grey box with
+## the players in it.
 ##
-## [b]This is a development harness, not a level and not a match.[/b] It exists
-## so the player controller can be walked around and broken on purpose. Chapter
-## 7 replaces the environment and Chapter 8 replaces the presentation; the
-## player scene itself survives both, untouched.
+## [b]This is a development harness, not a final level and not a final match.[/b]
+## Chapter 7 replaces the environment and Chapter 8 replaces the presentation.
+## Everything that actually has to survive both - the [Player] scene, the
+## [NetworkManager] autoload, the weapon and its damage contract - lives outside
+## this file and is untouched by either.
 ##
-## Everything the player does stays inside the [Player] scene. This node's only
-## jobs are choosing a spawn point, handing control to the player, and making
-## sure the grey box's Chapter 1 overview camera does not fight it for the
-## screen.
+## ## Why it handles both offline and online
+##
+## There are two ways to arrive at this scene, and they end in the same place:
+##
+## - [b]Offline.[/b] Nobody pressed Host or Join. One local player is
+##   instantiated directly, on the spot, with no network involved. This is what
+##   the single-player playtest has always been, and Chapter 3's whole test
+##   suite runs through it.
+## - [b]Online.[/b] Somebody pressed Host or Join. The [MultiplayerSpawner] owns
+##   every body from then on, on every machine, and this node's only job is to
+##   decide [b]where[/b] a body appears and ask the host to spawn it.
+##
+## Keeping both in one scene rather than adding a separate "network match" scene
+## means there is one place where a player is created, so there is one place to
+## be wrong. A second scene would be a second spawner, a second camera handoff,
+## and a second copy of the rule that a body is configured on every machine and
+## not just the one that owns it.
+##
+## ## The rule that is easy to get wrong
+##
+## A spawned player's [method Player.configure_for_network] is called on
+## [b]every[/b] machine, with the same arguments, not only on the one that owns
+## it. That is what makes the authority flags agree across the session. A
+## client that skipped configuration would have a body whose synchronisers
+## pointed at nobody, and the failure would be "replication silently does
+## nothing" rather than anything that points at the cause.
 
 const PLAYER_SCENE := preload("res://scenes/player/player.tscn")
 
-## Which of the grey box's spawn markers to use. The grey box authors two,
-## one per side, because Chapter 4 will need both. A solo playtest has no sides
-## yet, so it just picks one.
-const SPAWN_MARKER_NAME := "AlphaSpawn"
+## Where spawned bodies are parented, relative to the spawner.
+##
+## A named constant rather than a literal in the scene file, because the path
+## has to agree with the node that actually exists and the scene file is not
+## somewhere a reader would think to look for that. See
+## [method _configure_spawner] for the check that keeps the two in step.
+const SPAWN_PATH := NodePath("../Players")
 
-## Used only if the marker is missing, so a renamed node in the environment
+## Which marker a side spawns at. Two sides, two markers, authored by the
+## environment in Chapter 1 precisely so this file would not have to change when
+## networking arrived.
+const ALPHA_SPAWN := "AlphaSpawn"
+const BRAVO_SPAWN := "BravoSpawn"
+
+## Used only if a marker is missing, so a renamed node in the environment
 ## degrades into a slightly odd spawn rather than a null reference crash in the
 ## middle of [method _ready].
 const FALLBACK_SPAWN := Vector3(0.0, 0.0, 20.0)
 
-## The live player, exposed so the debug overlay can read its position and
-## movement state without searching the tree for it.
+## Fallback yaw when no marker can supply a facing. Chosen so an offline
+## playtest still looks down the range rather than at a wall - the Chapter 2
+## default, kept so the offline view has not changed under anyone.
+const FALLBACK_YAW := 0.0
+
+## How far a spawned body looks for a free spot before giving up and standing
+## inside a teammate.
+##
+## Spawn points are shared, not per-peer, so two players connecting in the same
+## frame would otherwise land in exactly the same capsule. Nudging forward in
+## small steps is enough to separate them for a development lobby and is far
+## less machinery than a real spawn-occupancy protocol, which is Chapter 5's
+## problem once there is a round to spawn into.
+const SPAWN_NUDGE_STEP := 1.5
+const MAX_SPAWN_NUDGES := 8
+
+## The player this machine drives, exposed so the debug overlay and the dev
+## network UI can read it without searching the tree. Null briefly after a
+## disconnect, until either an offline body is put back or a new one arrives.
 var player: Player = null
+
+@onready var _spawner: MultiplayerSpawner = $PlayerSpawner
 
 
 func _ready() -> void:
 	_step_aside_from_overview_camera()
-	_spawn_player()
+	_configure_spawner()
+
+	# The spawner is only asked to do anything by the host, but the signal
+	# connection is made on every machine, because a client that never hears
+	# "peer X registered" has no way to know a body is coming.
+	NetworkManager.peer_registered.connect(_on_peer_registered)
+	NetworkManager.peer_unregistered.connect(_on_peer_unregistered)
+	NetworkManager.roster_updated.connect(_on_roster_updated)
+
+	# A body is spawned by the host through MultiplayerSpawner, which
+	# instantiates it on every peer. Nothing is instantiated here directly when
+	# the session is online - not even the host's own, because a body the host
+	# made for itself alone would exist on one machine and not the other five.
+	if NetworkManager.is_online:
+		if NetworkManager.is_host:
+			# The host is a peer like any other and joined before any client
+			# could, so its own body is registered but not yet spawned.
+			var side := NetworkManager.players.team_of(NetworkManager.local_peer_id)
+			_on_peer_registered(NetworkManager.local_peer_id, side,
+				NetworkManager.players.display_name_of(NetworkManager.local_peer_id))
+		else:
+			# This scene - and therefore the spawner that a spawned body would
+			# arrive through - exists now, so the host may send one. Asking
+			# here rather than having the host guess is what stops the spawn
+			# message arriving before there is anywhere to put it.
+			NetworkManager.request_spawn.rpc_id(NetworkManager.SERVER_PEER_ID)
+		return
+
+	_spawn_offline_player()
+
+
+## Points the spawner at this script's factory and subscribes to the result.
+##
+## [code]spawn_function[/code] is assigned in code rather than in the scene file
+## because it is a reference to a method on [b]this[/b] instance, and a scene
+## cannot hold a callable to a sibling node without either an autoload or an
+## awkward exported resource. The spawner is a plain child, so "this instance"
+## is the only thing that can build the bodies and it is right here.
+##
+## The [signal MultiplayerSpawner.spawned] connection is what makes
+## configuration happen on every machine. Without it a body would be added and
+## left in its default single-player state - peer 1, no team, camera current -
+## which is a body that thinks it is the host's player and tries to replicate
+## authority it was never given.
+func _configure_spawner() -> void:
+	if _spawner == null:
+		push_warning("Playtest: no PlayerSpawner child; networked play is disabled.")
+		return
+
+	_spawner.spawn_function = _spawn_networked_player
+	_spawner.spawned.connect(_on_player_spawned)
+
+	# Set in code as well as in the scene file, and checked.
+	#
+	# `spawn_path` is relative to the spawner, and a relative NodePath that
+	# points at a node that is not there produces exactly one error -
+	# "Cannot find spawn node" - from inside Godot's C++, once per spawn, with
+	# no mention of the path that was wrong. Asserting it here turns a
+	# replication mystery that shows up ten seconds later into a sentence that
+	# says which path failed and where it was looked for.
+	_spawner.spawn_path = SPAWN_PATH
+	if _spawner.get_node_or_null(SPAWN_PATH) == null:
+		push_error("Playtest: PlayerSpawner's spawn_path '%s' does not resolve to a node. \
+Networked spawning is disabled." % SPAWN_PATH)
+		return
+
+	# Unlimited, because the roster - not the spawner - is what enforces the
+	# six-player cap, and the roster is the thing that knows a side is full.
+	# A spawner limit would be a second, independent answer to "is there room",
+	# and two answers that disagree produce either a rejected spawn with no
+	# explanation or a seventh player in a 3v3.
+	_spawner.spawn_limit = 0
 
 
 ## The grey box keeps the elevated camera it needed in Chapter 1, to prove the
@@ -45,20 +167,207 @@ func _step_aside_from_overview_camera() -> void:
 		overview.current = false
 
 
-func _spawn_player() -> void:
+# --- Offline --------------------------------------------------------------
+
+## The Chapter 2 and Chapter 3 path, unchanged in behaviour: one local body,
+## built here, driven here, no network in the loop at all.
+##
+## It is also the path every automated test takes, which is why it has to keep
+## working with no session. If a change to the networked path ever breaks the
+## single-player case, the test suite notices immediately.
+func _spawn_offline_player() -> void:
 	player = PLAYER_SCENE.instantiate() as Player
-	player.name = "Player"
+	player.name = "LocalPlayer"
+
+	# Identity before the tree, by the same route a spawned body takes. The
+	# offline peer id is the server's rather than
+	# [member NetworkManager.local_peer_id], which is 0 with no session: peer 0
+	# is not a player, and a body that believes it is peer 0 is a body whose
+	# synchronisers point at nobody.
+	player.pending_peer_id = NetworkManager.SERVER_PEER_ID
+	player.pending_team = Team.Side.ALPHA
+	player.pending_display_name = PlayerRegistry.default_name_for(
+		NetworkManager.SERVER_PEER_ID)
 	add_child(player)
 
-	# Added to the tree first, so the player's own _ready has run - it is what
-	# applies the standing collider and captures the mouse - before it is moved
-	# into place.
-	player.teleport_to(_spawn_point(), 0.0)
+	# Added before the teleport so the player's own _ready has run - it is what
+	# applies the standing collider, configures replication, picks up the camera
+	# and captures the mouse - before it is moved into place.
+	player.teleport_to(_spawn_point(Team.Side.ALPHA), FALLBACK_YAW)
 
 
-func _spawn_point() -> Vector3:
-	var marker := get_node_or_null("Environment/%s" % SPAWN_MARKER_NAME) as Marker3D
+# --- Networked ------------------------------------------------------------
+
+## Host only. A peer has been given a side; spawn their body everywhere.
+##
+## Called for the host's own peer as well as for every client, because the
+## host is in the roster from the moment it starts hosting and ENet never raises
+## a connection event for the server about itself.
+func _on_peer_registered(peer_id: int, team_side: int, player_name: String) -> void:
+	if not NetworkManager.is_host or _spawner == null:
+		return
+
+	# A re-registration for a peer that already has a body would leave two
+	# bodies fighting over one identity. The roster is the authority on who
+	# exists, so if it says the peer is registered and a body is present,
+	# something has asked twice and the second request is the one to ignore.
+	if NetworkManager.get_player_for(peer_id) != null:
+		return
+
+	_spawner.spawn({
+		"peer_id": peer_id,
+		"team": team_side,
+		"display_name": player_name,
+		"spawn": _spawn_point(team_side),
+		"yaw": _spawn_yaw(team_side),
+	})
+
+
+## Runs on [b]every[/b] machine, by the spawner, with the same data the host
+## passed to [method MultiplayerSpawner.spawn].
+##
+## This is the single place a networked [Player] is constructed, and it is why
+## there is no second player scene and no second spawn path.
+##
+## [method MultiplayerSpawner.get_spawn_data] is valid in here and nowhere else
+## except the [signal MultiplayerSpawner.spawned] handler - the spawner is
+## mid-flight and has nothing to hand out otherwise. Everything that has to be
+## known before the node enters the tree is written here, for that reason and no
+## other.
+func _spawn_networked_player(data: Variant) -> Player:
+	var spawn_data := data as Dictionary
+	var body := PLAYER_SCENE.instantiate() as Player
+
+	# The name is cosmetic on a single player and load-bearing on a network:
+	# RPCs are addressed by node path, so every machine has to agree on it or a
+	# client's `resolve_incoming_shot` call arrives at a node that does not
+	# exist. Deriving it from the peer id rather than from a generated name is
+	# what makes it deterministic.
+	var peer_id := int(spawn_data.get("peer_id", NetworkManager.SERVER_PEER_ID))
+	body.name = "Player%d" % peer_id
+
+	# Identity, before the tree. See [member Player.pending_peer_id] for why
+	# this cannot wait for the `spawned` signal: by then `_ready` has run, and
+	# a remote body that spent its first frames thinking it was local has
+	# already claimed the camera and taken the mouse.
+	body.pending_peer_id = peer_id
+	body.pending_team = int(spawn_data.get("team", Team.Side.NONE))
+	body.pending_display_name = String(spawn_data.get("display_name", ""))
+	return body
+
+
+## Configures a body after the spawner has added it, on every machine.
+##
+## Runs on [b]every[/b] machine, once per body, after the spawner has added it.
+##
+## The body is already configured by now - [method _spawn_networked_player] wrote
+## its identity before the tree, and [method Player._ready] applied it on the
+## way in. What is left here is the part that can only happen once the node has
+## a parent and a transform: putting it where the host decided, and noticing if
+## it is the one this machine drives.
+func _on_player_spawned(body: Node) -> void:
+	var networked := body as Player
+	if networked == null:
+		return
+
+	var data: Dictionary = _spawner.get_spawn_data()
+	networked.teleport_to(data.get("spawn", FALLBACK_SPAWN), float(data.get("yaw", 0.0)))
+
+	# Matched on the body's own identity rather than on the spawn data, so this
+	# reads the same answer the rest of the node does. A body that disagrees with
+	# its own peer id is exactly the kind of mismatch that makes a client look
+	# like it is driving somebody else.
+	if networked.peer_id == NetworkManager.local_peer_id \
+			and not networked.is_network_remote:
+		player = networked
+
+
+## A peer is gone. Despawn the body if the spawner has not already.
+##
+## The spawner will normally have removed it before this arrives, in which case
+## there is nothing to do and [method NetworkManager.get_player_for] correctly
+## answers null. The fallback is for the case where the disconnect reached us
+## first: freeing by hand then is correct, and freeing an already-freed node
+## cannot happen because the lookup is what found it.
+func _on_peer_unregistered(peer_id: int) -> void:
+	var body := NetworkManager.get_player_for(peer_id)
+	if body == null:
+		return
+	if body == player:
+		player = null
+	body.queue_free()
+
+
+## Host and client alike: if we have lost the session, put a local body back.
+##
+## This is what makes quitting the host recoverable. A client that had three
+## teammates and a live mouse is left with three remote bodies that will never
+## move again and no way to make them go away; putting one local body back and
+## clearing the roster is the whole of "recover", and it is better than a menu.
+func _on_roster_updated() -> void:
+	if NetworkManager.is_online:
+		# Keep the pointer honest as peers come and go.
+		player = NetworkManager.get_local_player()
+		return
+
+	_clear_all_players()
+	_spawn_offline_player()
+
+
+# --- Spawn points ---------------------------------------------------------
+
+## Where a side appears, nudged clear of anybody already standing there.
+func _spawn_point(side: int) -> Vector3:
+	var base := _marker_position(side)
+	for attempt in MAX_SPAWN_NUDGES:
+		if not _occupied(base):
+			return base
+		base += Vector3(0.0, 0.0, SPAWN_NUDGE_STEP)
+	return base
+
+
+## Which way a side faces when it appears.
+##
+## Derived from the marker itself rather than a constant, so a map that puts
+## Bravo's spawn facing the wrong way is fixed by moving a marker instead of by
+## editing this file. Falls back to the offline default when the marker is
+## missing.
+func _spawn_yaw(side: int) -> float:
+	var marker := get_node_or_null("Environment/%s" % _marker_name(side)) as Marker3D
 	if marker == null:
-		push_warning("Playtest: no '%s' marker under Environment." % SPAWN_MARKER_NAME)
+		return FALLBACK_YAW
+	var yaw := marker.global_rotation.y
+	return yaw if not is_zero_approx(yaw) else FALLBACK_YAW
+
+
+func _marker_position(side: int) -> Vector3:
+	var marker := get_node_or_null("Environment/%s" % _marker_name(side)) as Marker3D
+	if marker == null:
+		push_warning("Playtest: no '%s' marker under Environment." % _marker_name(side))
 		return FALLBACK_SPAWN
 	return marker.global_position
+
+
+func _marker_name(side: int) -> String:
+	return BRAVO_SPAWN if side == Team.Side.BRAVO else ALPHA_SPAWN
+
+
+## Is anything standing on this spot?
+##
+## A cheap 2D test on purpose. Comparing full positions would mean a body that
+## has been nudged a centimetre by a collision solver counts as a different
+## spot, and six players would end up strung out along the back wall instead of
+## clustered at the spawn.
+func _occupied(point: Vector3) -> bool:
+	for body in NetworkManager.get_players():
+		var flat_a := Vector2(body.global_position.x, body.global_position.z)
+		var flat_b := Vector2(point.x, point.z)
+		if flat_a.distance_to(flat_b) < SPAWN_NUDGE_STEP:
+			return true
+	return false
+
+
+func _clear_all_players() -> void:
+	for body in NetworkManager.get_players():
+		body.queue_free()
+	player = null

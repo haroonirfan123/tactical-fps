@@ -2,16 +2,18 @@
 
 An original 3v3 tactical first-person shooter built in Godot.
 
-> **Status: Chapter 3 complete.**
-> The project structure, phase state machine, data resources, boot scene and
-> debug overlay exist from Chapter 1. Chapter 2 adds a reusable first-person
-> `Player` with full movement, mouse look, crouch, jump, step-up and slope
-> handling. Chapter 3 adds a modular weapon system, one working full-auto rifle
-> (**Kestrel**), hitscan ballistics, a reusable damage interface, player health
-> and death, headshots, reloads, recoil, hit feedback, and a practice range with
-> targets, cover and a hostile turret. There is no networking of the player and
-> no real HUD yet — Chapter 4 and Chapter 8 respectively. See
-> [Roadmap](#roadmap) for what comes next.
+> **Status: Chapter 4 complete.**
+> Chapters 1–3 ship a reusable `Player` with full movement, a modular weapon system,
+> one working full-auto rifle (Kestrel), hitscan ballistics, a reusable damage
+> interface, player health and death with headshots, and a practice range with
+> targets, cover and a hostile turret. Chapter 4 adds real high-level Godot
+> multiplayer: host+client dev flow over LAN/local, identity-in-before-tree
+> spawning, client-owned movement (20 Hz transform sync), server-owned health
+> and team (reliable change-driven RPC), host-validated shot resolution,
+> networked death, 3v3 team assignment, a six-player capacity enforced at both
+> transport and application level, and a temporary dev network UI.
+> Remaining: tactical round system (Ch. 5), unique mechanics (Ch. 6), final map
+> (Ch. 7), real HUD/menus (Ch. 8), art/audio/polish (Ch. 9), testing/ship (Ch. 10).
 
 ---
 
@@ -675,7 +677,7 @@ Each chapter builds on the last.
       sprinting, crouching
 - [x] **Ch. 3 — Weapons & Combat:** guns, shooting, damage, health, headshots,
       reloads
-- [ ] **Ch. 4 — 3v3 Multiplayer:** networking, players, synchronization, teams
+- [x] **Ch. 4 — 3v3 Multiplayer:** networking, players, synchronization, teams
 - [ ] **Ch. 5 — Tactical Round System:** rounds, objectives, timers, victory
       conditions
 - [ ] **Ch. 6 — Unique Game Mechanics:** original abilities/gadgets that make
@@ -772,3 +774,86 @@ Everything user-facing will be original work: the game title, agent and ability
 names, weapon names, map names, level layouts, art direction, and UI. The genre
 is *tactical FPS*; the content is ours. Naming and visual identity are handled in
 Chapters 6 and 8 — until then, `3v3 Tactical FPS` is a working title only.
+
+---
+
+## Chapter 4 — 3v3 Multiplayer Foundation
+
+**Status: Complete.** Real high-level Godot multiplayer, built on `ENetMultiplayerPeer`.
+
+### What Chapter 4 delivers
+
+| Feature | Implementation |
+|---------|----------------|
+| **Host + client dev flow** | `NetworkManager.host_game(port)` / `join_game(addr, port)`; local/LAN only, no matchmaking, no dedicated server |
+| **Identity-in-before-tree** | `Player.pending_peer_id / pending_team / pending_display_name` set by `_spawn_networked_player` before the node enters the scene; `Player._ready` calls `configure_for_network` so the first frame has correct authority, camera and input |
+| **Client-authoritative movement** | One `MultiplayerSynchronizer` (`TransformSync`, authority = owning peer, 20 Hz). The client moves; the host's copy follows. No server-side simulation of remote players. |
+| **Server-authoritative health / team / death** | Change-driven RPC (`_net_state_receive`, reliable, `any_peer` + sender check). A second synchronizer cannot carry server-authoritative state to a client-owned body — Godot routes a synchronizer's packets only to the node's owning peer. The host broadcasts the trio on every health change; all peers apply it. |
+| **Host-validated combat** | `Player.request_shot_from_network(origin, direction)` — `@rpc("any_peer", "call_remote", "unreliable_ordered")` with internal `is_server()` check. Host re-derives ray from its own copy of the world, validates origin (2.0 m tolerance), rate-limits against weapon fire interval, casts `hitscan`, applies damage, then broadcasts `_confirm_shot` (reliable, `any_peer` + sender check) so all clients draw the impact. The host's own player takes the identical validating path. |
+| **Networked death** | `die()` splits into host-only bookkeeping (`state.record_death()`) and local presentation (`_begin_death_presentation()`). Corpse moves to `CORPSE` layer on all machines; camera falls to `death_camera_height` over a 0→1 timer. |
+| **3v3 team system** | `PlayerRegistry` (plain `RefCounted`, host-owned). `register(peer_id)` owns the capacity rule — refuses the 7th peer, balances teams by count (tie → ALPHA). Teams are `ALPHA` / `BRAVO` only; no victory logic. |
+| **Max 6 players / 3 per team** | `NetworkManager.get_max_players()` derives cap from `MatchRules.players_per_team` (default 3). ENet `create_server(port, cap - 1)` enforces at transport level; `PlayerRegistry.register()` enforces at application level. A 7th peer is refused at the handshake. |
+| **Dev network UI** | `DevNetworkUI` (CanvasLayer, hidden on main menu, deleted in Ch. 8). Host / Join / Offline buttons, status line, local peer id, connected count. |
+
+### Architecture decisions
+
+- **Two-synchronizer design abandoned.** `MultiplayerSynchronizer` only sends to the node's owning peer, so a server-authority synchronizer on a client-owned body silently drops packets for everyone except that owner. The probe proved this empirically. State is now a change-driven RPC with the same authority model (clients cannot write).
+- **`_confirm_shot` uses `any_peer` + sender check, not `authority`.** The node's multiplayer authority is the owning peer; `authority` would let the host never send a verdict about a client's shot. Sender identity (`get_remote_sender_id() == SERVER_PEER_ID`) is the verifiable check.
+- **Roster replicated as full snapshots.** `_receive_roster.rpc(entries)` — reliable, authority, call_remote. Clients `replace_all()`; no merge, no drift. Initial state for late joiners seeded in `configure_for_network` and `_receive_roster`.
+- **No periodic state poll.** `_publish_net_state()` fires only when health/alive/team changes. A player whose health changes twice a second sends two packets, not ten.
+- **`PlayerRegistry.register()` owns the capacity rule.** Single source of truth. `NetworkManager.register_peer` keeps the host check + log.
+- **Offline preserved.** `BOOT_INTO_PLAYTEST = false`; main menu is front door with Host/Join/Offline buttons. Offline body uses `SERVER_PEER_ID` (1), not `local_peer_id` (0).
+
+### Files created / modified
+
+| File | Change |
+|------|--------|
+| `scripts/player/player.gd` | Identity-before-tree (`pending_*`), `_apply_authority_state()`, two-authority replication (transform RPC, state RPC), remote interpolation (3 snapshots, smoothstep), host shot validation, `request_shot_from_network`, `_confirm_shot` fix, `rejected_shot_count()`, `die()` split, team colour, local-body state consume, `_net_state_received` gate, `_configure_replication` NodePath fix |
+| `scripts/network/player_registry.gd` | `register()` owns capacity, `set_limits()`, `count_for_side()`, `replace_all()` |
+| `scripts/network/network_manager.gd` | ENet cap-1, `get_player_count()`, roster snapshot RPC, `request_spawn()` handshake, `_on_peer_connected` defers spawn to `request_spawn`, `get_local_player()` offline fallback |
+| `scripts/game/playtest.gd` | `SPAWN_PATH` const + collision-checked spawner config, `_spawn_offline_player` via pending identity, `_spawn_networked_player` sets pending identity before tree entry, `_on_player_spawned` no longer re-configures |
+| `scenes/player/player.tscn` | `TransformSync` only; `Mat_body` `resource_local_to_scene = true` |
+| `scenes/game/playtest.tscn` | `Players` + `PlayerSpawner` |
+| `scripts/ui/dev_network_ui.gd` / `.tscn` | Disposable dev UI (Host, Join, Offline, status, local peer, connected count) |
+| `scripts/ui/main_menu.gd` + `.tscn` | Offline button |
+| `scripts/ui/dev_overlay.gd` | Roster label, local-player lookup |
+| `scripts/core/main.gd` | `BOOT_INTO_PLAYTEST = false` |
+| `scripts/fx/weapon_fx.gd` | Shared impact spawn with network path guard |
+
+### Controls (multiplayer)
+
+| Key | Action |
+|-----|--------|
+| `H` (menu) | Host a session |
+| `J` (menu) | Join `127.0.0.1:27015` |
+| `O` (menu) | Offline playtest |
+
+In-match controls unchanged from Chapter 3 (`WASD`, `Shift`, `Ctrl`, `Space`, `LMB`, `R`, `Escape`).
+
+### Tests performed
+
+- **Headless editor quit** (`--headless --editor --quit`): clean.
+- **Headless quit** (`--headless --quit`): clean.
+- **Windowed boot** (`--quit-after 120`): clean.
+- **2-client harness** (`--clients=2`): all core sections pass (1–9): offline regression, host session, client spawn, roster/teams, transform sync, health authority, client-cannot-set-health, combat, shot rejection.
+- **5-client harness** (`--clients=5`): host spawns 5 clients, roster at 6/6, team balance within one, capacity rule refuses 7th peer at application level, host-leaves recovery works. Minor client-readiness timing flakiness in the test harness (not game logic).
+- **Multi-instance real runs**: 1 host + 2–5 join clients, local LAN, multiple hours aggregate.
+
+### Problems found and fixed
+
+| Problem | Fix |
+|---------|-----|
+| State synchronizer silently dropped server-authoritative state for client-owned bodies | Replaced `StateSync` with change-driven RPC (`_net_state_receive`), same pattern as working `_confirm_shot` |
+| `_confirm_shot` guard used `is_server()` blocking clients from receiving verdicts | Changed to sender check (`get_remote_sender_id() == SERVER_PEER_ID`) |
+| Initial state race: client's first roster arrived before bodies existed | Seeded mirror fields in `configure_for_network` + `_receive_roster` applies to existing bodies |
+| Client spawn race: host spawned on connect before client's spawner was ready | Deferred spawn to `request_spawn` handshake; host's own peer spawns immediately |
+| `request_spawn` RPC signature mismatch (extra argument) | Removed spurious `, 1` argument |
+| `MultiplayerSynchronizer.add_property` StringName + missing `:` prefix | Changed to `NodePath(":property")` |
+| Death guard on `is_alive` meant death routine never ran | Guard on separate `_is_dying` flag |
+| `queue_free` in teardown left ghost bodies in `players` group | Changed to `free()` for immediate removal |
+| Material was shared across instances, team colour bled | `resource_local_to_scene = true` in `.tscn`; `_apply_team_colour()` writes in place |
+| Offline `is_network_remote` and `get_local_player` used `local_peer_id` (0) | Offline peer = `SERVER_PEER_ID` (1); offline fallback to single body in `players` group |
+
+---
+
+## Roadmap

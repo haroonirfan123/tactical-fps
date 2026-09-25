@@ -33,6 +33,19 @@ extends CharacterBody3D
 ## health reaches zero. The HUD reads this; Chapter 5's scoreboard will too.
 signal health_changed(health: int, alive: bool)
 
+## A shot this player fired has been resolved by whoever is authoritative for
+## it. [param victim] is the [Player] that was hit, or null for scenery, and
+## [param at] / [param normal] describe where the round stopped. [param is_local]
+## is false when this arrived over the network, which is how the shooter - and
+## its weapon feedback - tell its own confirmed hit apart from a verdict about
+## somebody else's.
+signal shot_resolved(at: Vector3, normal: Vector3, victim: Player, zone: int, killed: bool, is_local: bool)
+
+## A shot landed on this player. Fired on every machine, including the victim's
+## own, so a HUD hit indicator is one connection rather than a special case for
+## "am I the one who got shot".
+signal took_hit(from: Node, amount: float, zone: int)
+
 ## The player was eliminated. [param source] is whatever did it, which may be
 ## null - falling out of the world should still produce a death.
 signal died(source: Node)
@@ -170,6 +183,127 @@ enum MovementState {
 ## because there is one per player. Chapter 3 reads health from here.
 var state: PlayerState = PlayerState.new()
 
+# --- Network identity (Chapter 4) ----------------------------------------
+
+## Which peer drives this body. Defaults to [constant NetworkManager.SERVER_PEER_ID]
+## so a player instantiated in the editor, or in a Chapter 3 harness, is
+## immediately valid as a single-player body and does not have to be told it is
+## the only one in the world.
+@export var peer_id: int = NetworkManager.SERVER_PEER_ID
+
+## Set by [method configure_for_network] when this body belongs to a different
+## peer. A remote body does not run physics, does not read input, and has no
+## camera - it is a transform receiver with a health readout.
+var is_network_remote: bool = false
+
+## Host-side bookkeeping for shot validation. See [method _resolve_incoming_shot].
+var _last_validated_shot_ms: int = -100000
+
+## Host-side count of rejected shots, exposed for the dev overlay so a
+## misbehaving client is visible rather than mysterious.
+var _rejected_shots: int = 0
+
+
+## How many shots this body's authority has refused, and why the most recent
+## one was refused.
+##
+## Public because a silently dropped shot is the hardest kind of networking bug
+## to diagnose: from the shooter's side the trigger worked, the flash played,
+## and nothing happened. A counter the dev overlay can display turns "something
+## is wrong with combat" into "peer 4 has had nine rejected shots", which points
+## straight at the cause.
+func rejected_shot_count() -> int:
+	return _rejected_shots
+
+# --- Replicated state ----------------------------------------------------
+
+## Health as the network sees it.
+##
+## [b]This is a mirror of [member PlayerState.health], not a replacement for
+## it.[/b] The value lives on this node so it can cross the wire, and the job
+## of putting it back into [member state] on a receiving machine belongs to the
+## host's state RPC ([method _net_state_receive] and its helper [method
+## _sync_state_from_network]). Keeping both is deliberate rather than
+## duplicated: `state` is the game object's truth and is what the HUD, the
+## scoreboard and the Chapter 5 round loop read, while these three exist only
+## to cross the wire.
+var net_health: int = PlayerState.MAX_HEALTH
+var net_alive: bool = true
+var net_team: int = Team.Side.NONE
+
+## Whether the host has ever sent this body's state.
+##
+## The three fields above all have defaults, and two of them -
+## [constant PlayerState.MAX_HEALTH] and [code]true[/code] - are exactly what
+## the host would send for an untouched player. So their defaults cannot be
+## read as an answer. [member net_team] can: [constant Team.Side.NONE] is a
+## value the host never sends, because every player is given a side before it is
+## spawned. This flag turns that into an explicit "the host has spoken" rather
+## than leaving it implicit in a magic constant - see
+## [method _sync_state_from_network] for what goes wrong without it.
+var _net_state_received: bool = false
+
+## Set when the host changes any of the mirrored fields, so a client can tell a
+## replicated change from its own local damage. Without this, a client that took
+## damage optimistically would fight the host's copy on every arrival.
+var _is_net_state_authoritative: bool = true
+
+# --- Interpolation (remote bodies only) -----------------------------------
+
+## Where a remote body was last told to be, and where it is allowed to be
+## drawn while it catches up.
+##
+## The obvious implementation - let the synchroniser write
+## [member Node3D.global_position] and draw it - produces visible 20 Hz
+## stepping, because a body jumps a third of a metre every 50 ms and then sits
+## still. Snapping the draw position toward the replicated one at a bounded rate
+## trades a few milliseconds of latency for motion that reads as continuous,
+## which is the whole reason to bother.
+var _render_position: Vector3 = Vector3.ZERO
+var _render_rotation_y: float = 0.0
+var _render_initialised: bool = false
+
+## Metres per second a remote body is allowed to close the gap to its
+## authoritative position. Generous enough to catch up from a teleport within a
+## couple of frames, tight enough that a desync does not visibly slide across
+## the map.
+const REMOTE_CATCHUP_SPEED := 28.0
+
+## How many seconds of position history to interpolate through. Two snapshots
+## is the minimum that lets a body move *between* updates rather than towards
+## them.
+const REMOTE_SNAPSHOT_HISTORY := 3
+
+## Recent authoritative positions with the times they arrived.
+var _snapshot_times: PackedFloat32Array = PackedFloat32Array()
+var _snapshot_positions: PackedVector3Array = PackedVector3Array()
+
+## Seconds between transform snapshots.
+##
+## Named for the unit it is in, because [member
+## MultiplayerSynchronizer.replication_interval] is a duration and not a rate,
+## and a constant called `..._HZ` holding `0.05` invites the reader to divide it
+## - producing a twenty-second interval and a replication system that appears to
+## work on a body standing still.
+const TRANSFORM_REPLICATION_SECONDS := 0.05
+
+## How far a client's claimed eye position may be from where the host believes
+## that player is, in metres, before the shot is refused.
+##
+## Sized for the worst honest case rather than the average one. The host's copy
+## of a remote body is a snapshot behind, and a player at a sprint covers
+## several metres in 50 ms, so a tight bound would reject legitimate shots
+## during exactly the movement a player is most likely to be shooting during.
+## Two metres is comfortably more than interpolation lag and comfortably less
+## than "somewhere else entirely".
+const MAX_SHOT_ORIGIN_ERROR := 2.0
+
+## Slack allowed on the host's fire-rate check, in milliseconds. The client
+## enforces the real interval against its own clock and the host enforces the
+## same interval against a different one, so without a little tolerance a
+## legitimate shot gets refused roughly whenever the two clocks disagree.
+const SHOT_CLOCK_TOLERANCE_MS := 15
+
 # --- Combat (Chapter 3) -------------------------------------------------
 
 ## The equipped weapon, or null when this player has nothing in their hands.
@@ -252,10 +386,12 @@ const VIEWMODEL_KICK_RECOVERY := 12.0
 @onready var _camera: Camera3D = $Head/Camera3D
 @onready var _weapon_mount: Node3D = $Head/WeaponMount
 @onready var _hit_marker: HitMarker = $HitMarkerLayer/HitMarker
+@onready var _transform_sync: MultiplayerSynchronizer = $TransformSync
 
 ## Optional translucent capsule used only to make the collider visible while
-## developing. Hidden by default, and parented to the collision shape so it
-## can never drift away from the thing it is showing.
+## developing, and permanently visible for a body this machine is not driving.
+## Hidden by default, and parented to the collision shape so it can never drift
+## away from the thing it is showing.
 @onready var _body_mesh: MeshInstance3D = $Collision/BodyMesh
 
 ## 0.0 = fully crouched, 1.0 = fully standing. The single source of truth for
@@ -285,15 +421,36 @@ var _move_velocity: Vector3 = Vector3.ZERO
 ## refusal can be reported rather than silently ignored.
 var _last_jump_was_refused: bool = false
 
+## Identity handed in by the match scene's spawn function [b]before[/b] this node
+## entered the tree.
+##
+## Exists because [MultiplayerSpawner] adds the node first and only then raises
+## [signal MultiplayerSpawner.spawned], so by the time the match scene gets to
+## tell a body who it belongs to, [method _ready] has already run - and already
+## captured the mouse, made its camera current and handed it a local identity.
+## On the host, that window is long enough for somebody else's player to steal
+## the pointer, and the damage is done before any configuration code runs.
+##
+## The spawn function can write these because it holds the instance before
+## anything parents it, so [method _ready] has an answer instead of a guess. The
+## alternative - deciding after the fact - has no way to un-capture a mouse.
+var pending_peer_id: int = 0
+var pending_team: int = Team.Side.NONE
+var pending_display_name: String = ""
+
 
 func _ready() -> void:
 	add_to_group(&"players")
 
 	_apply_stance()
 
+	# Replication is configured before anything can fire a synchroniser at us,
+	# because a MultiplayerSynchronizer with a null config is inert and would
+	# silently replicate nothing for the rest of the session.
+	_configure_replication()
+
 	# Mouse look belongs to whichever camera this player owns, so a second
 	# player in the match does not fight the first one for the pointer.
-	_camera.current = true
 	_camera.fov = GameConfig.field_of_view
 
 	if _weapon_mount != null:
@@ -305,8 +462,229 @@ func _ready() -> void:
 	# waiting for the first physics frame with a stale zero.
 	_apply_view()
 
+	# A spawned body already knows who it is. Applying that now, inside _ready,
+	# is the only point at which "is this mine or somebody else's" can be
+	# answered before the node starts doing local-player things like capturing
+	# the mouse or claiming the camera.
+	if pending_peer_id > 0:
+		configure_for_network(pending_peer_id, pending_team, pending_display_name)
+		return
+
+	_apply_authority_state()
+
+
+## Turns the identity fields into everything that follows from them: which
+## camera is live, whether the body mesh is visible, whether this machine reads
+## input, and whether the mouse is ours.
+##
+## Deliberately [b]idempotent and callable from both [method _ready] and
+## [method configure_for_network]. It is called twice for a spawned body, once
+## per entry point, and has to produce the same answer both times - otherwise the
+## second call silently undoes the first, which is the kind of bug that only
+## shows up as a camera that flickers between owners on join.
+func _apply_authority_state() -> void:
+	_camera.current = not is_network_remote
+
+	# A remote body carries a viewmodel and a hit marker that nobody can see.
+	# Hiding them is not just tidiness: six visible Kestrels floating in front
+	# of five other players is the single most obvious sign that replication
+	# is only half working.
+	if is_network_remote:
+		_apply_remote_appearance()
+		return
+
+	if _body_mesh != null:
+		_body_mesh.visible = false
+
 	if capture_mouse_on_ready and input_enabled:
 		capture_mouse(true)
+
+
+## Sets this body's identity and decides who is authoritative for what.
+##
+## Called by the match scene on every machine, with the same arguments, as part
+## of spawning. It is not called only on the authority: a client that skipped
+## it would have a body with the wrong authority and would try to replicate a
+## transform nobody is listening for.
+func configure_for_network(p_peer_id: int, team_side: int, player_name: String = "") -> void:
+	peer_id = p_peer_id
+	state.setup(p_peer_id, player_name, team_side)
+
+	# [b]Offline, nothing on this machine is anybody's remote body.[/b] There is
+	# no multiplayer peer, so `get_unique_id()` is answering a question that
+	# does not apply - and answering it "wrongly" would hand the single local
+	# player a remote body, a dead camera and no input, which is a game that
+	# renders a room nobody can move in.
+	is_network_remote = NetworkManager.is_online \
+		and p_peer_id != multiplayer.get_unique_id()
+
+	# The node's own authority follows the owning peer, which is what makes
+	# `is_multiplayer_authority()` - used all over the RPC layer - answer the
+	# right question.
+	set_multiplayer_authority(p_peer_id)
+
+	# Movement authority is the owning peer; health, team and death are always
+	# the server's. Those two facts are not encoded the same way, because the
+	# two mechanisms they use have different rules about who may speak:
+	#
+	# The transform is a [MultiplayerSynchronizer], and synchronisers replicate
+	# cleanly from a client-owned node to the server - the client moves, the
+	# server's copy follows. Reversing the direction does not. A synchroniser
+	# whose authority is the server carries a client-owned body's state
+	# nowhere: Godot only routes a synchroniser's packets for a node to the
+	# peer that owns that node, so the owner receives the server's copy but
+	# everyone else, including the body's own driver, never sees it. The probe
+	# scene proved that point empirically (see Chapter 4's notes in the
+	# README): the host's own body's health arrived on clients, a client's own
+	# body's health never did.
+	#
+	# So state crosses the wire as a change-driven RPC instead - the host
+	# broadcasts the trio in [method _publish_net_state], and receiving peers
+	# apply it via [method _net_state_receive]. That keeps the exact same
+	# authority (clients cannot write, only the host may), and it is lighter
+	# than a periodic poll ever was, because a player whose health changes
+	# twice a second sends two packets, not ten.
+	_transform_sync.set_multiplayer_authority(p_peer_id)
+
+	# Input is the local machine's business only. A remote body keeps
+	# `input_enabled` true on the machine that owns it and false everywhere
+	# else, which is exactly the distinction Chapter 2's seam was built for.
+	input_enabled = not is_network_remote
+	_configure_replication()
+	_apply_authority_state()
+
+	# The mirror fields start at their defaults, and the defaults are not what
+	# the host wants to send - most visibly `net_team`, which starts as NONE.
+	# The state RPC sends whatever the host has in these fields, not whatever
+	# the host has in [member state], so if it is not primed here the host's
+	# first broadcast would tell every client that every player is on no side
+	# at all. Priming costs one line and removes a visible wrong-then-right
+	# flicker on every join.
+	_publish_net_state()
+
+	# On a client, `_publish_net_state` is a no-op (host-only). If the roster
+	# has already arrived (late join), the registry holds the authoritative
+	# values for this peer; otherwise fall back to the local state that was
+	# just set up. This ensures the first frame shows the host's truth.
+	if NetworkManager.is_online and not multiplayer.is_server():
+		var entry := NetworkManager.players.get_entry(peer_id)
+		if not entry.is_empty():
+			net_health = int(entry.get("health", PlayerState.MAX_HEALTH))
+			net_alive = bool(entry.get("is_alive", true))
+			net_team = int(entry.get("team", team_side))
+		else:
+			net_health = state.health
+			net_alive = state.is_alive
+			net_team = state.team
+		_net_state_received = true
+
+
+## Builds the transform replication config in code.
+##
+## In code rather than as a `.tscn` sub-resource so that the authority and the
+## property list sit next to each other in one readable block. A hand-authored
+## `SceneReplicationConfig` in a scene file is an opaque id reference, and the
+## one thing that must be right here - that the list contains exactly the two
+## transform properties and nothing that smells like authority - is exactly
+## the thing that is invisible in that format.
+##
+## Health, team and death are deliberately [b]not[/b] replicated here. State
+## crosses the wire as a change-driven RPC; see the notes beside
+## [method configure_for_network] for why a synchroniser cannot carry a
+## client-owned body's server-owned state to the client that drives it.
+func _configure_replication() -> void:
+	# Two facts about [method SceneReplicationConfig.add_property] that cost an
+	# afternoon between them, both worth writing down because neither produces
+	# a useful diagnostic:
+	#
+	# It takes a [NodePath], not a [StringName]. A StringName compiles, runs,
+	# and fails inside C++ with "p_path == NodePath() is true" - a native error
+	# with no script line attached and no GDScript warning to catch it first.
+	#
+	# The path needs a leading colon. Without one, the synchronizer walks it as
+	# a chain of *node* names, so `global_position` becomes "find a child called
+	# global_position" and the answer is "Node 'global_position' not found" -
+	# once per property, per sync interval, forever, drowning the log. The colon
+	# is Godot's own convention for "the last component is a property name", and
+	# with it present the first component is empty, which means the root node
+	# itself rather than a child of it.
+	var transform_config := SceneReplicationConfig.new()
+	# Only two properties. Position and yaw are the whole of what a remote peer
+	# needs to draw a body; pitch stays local because it is a property of the
+	# head, not the body, and because a remote player's head angle is not worth
+	# bandwidth until Chapter 6 gives remote players something to animate.
+	#
+	# `global_rotation` rather than `rotation`, deliberately: the synchroniser
+	# writes the property on whichever machine receives it, and a spawn placed
+	# under a rotated parent would have a local rotation that means something
+	# different there. A world-space value means the same thing everywhere.
+	for property in [":global_position", ":global_rotation"]:
+		transform_config.add_property(NodePath(property))
+	_transform_sync.replication_config = transform_config
+
+	# 20 Hz for movement, well under the 60 Hz physics tick. The cost of this
+	# choice is visible immediately if it is wrong: at full tick rate six
+	# players send sixty position updates a second each for a transform that
+	# changes smoothly, and the smoothing below hides the difference between
+	# 20 Hz and 60 Hz completely.
+	_transform_sync.replication_interval = TRANSFORM_REPLICATION_SECONDS
+
+
+## Hides everything on this body that only makes sense from inside it, and
+## shows everything that only makes sense from outside it.
+##
+## The pair is deliberate. A remote body must lose the camera, the viewmodel and
+## the hit marker - none of them can be seen and all three cost something to
+## process - and must gain the body mesh, which is hidden on a local player
+## because you are standing inside it. Getting only one half right produces
+## either invisible teammates or a gun floating in front of your face.
+func _apply_remote_appearance() -> void:
+	_camera.current = false
+	_set_weapon_visible(false)
+	if _hit_marker != null:
+		_hit_marker.visible = false
+	if _body_mesh != null:
+		_body_mesh.visible = true
+	_apply_team_colour()
+
+	# Nothing else needs to be done to stop a remote body being simulated: the
+	# physics is skipped entirely in [method _physics_process], so nothing ever
+	# calls [method CharacterBody3D.move_and_slide] on it and there is no
+	# velocity for the server to integrate. It stays a solid collider on the
+	# player layer, which is what it should be - a teammate you can stand
+	# behind and a target you can be shot at.
+
+
+## Tints the body mesh for whichever side this player is on.
+##
+## Not decoration. In a 3v3 the single most important thing a player needs from
+## another player is "are they on my side", and an untinted grey capsule makes
+## that a question the player has to answer by remembering a name. A colour per
+## side is the cheapest possible answer and it is the reason the registry
+## assigns a side at all.
+func _apply_team_colour() -> void:
+	if _body_mesh == null:
+		return
+	var colour: Color = TEAM_COLOURS.get(state.team, TEAM_COLOURS[Team.Side.NONE])
+	var material := _body_mesh.get_active_material(0)
+	if material is StandardMaterial3D:
+		# Written in place, with no [method Resource.duplicate] first. The
+		# material carries `resource_local_to_scene` in the scene file, so Godot
+		# already gave every instance of this scene its own copy - duplicating
+		# again would work and would hide the fact, which is the worse outcome:
+		# remove the flag one day and six players silently repaint each other
+		# again, with no error to point at.
+		(material as StandardMaterial3D).albedo_color = colour
+
+
+## One colour per side. Alpha is well below 1.0 so you can see somebody through
+## a body you are standing in - in a shooter, being able to see the fight
+## matters more than the body being solid-looking.
+const TEAM_COLOURS := {
+	Team.Side.NONE: Color(0.7, 0.7, 0.7, 0.18),
+	Team.Side.ALPHA: Color(0.25, 0.65, 1.0, 0.22),
+	Team.Side.BRAVO: Color(1.0, 0.35, 0.25, 0.22),
+}
 
 
 ## Puts the starting weapon in this player's hands and wires up everything the
@@ -377,7 +755,165 @@ func _update_viewmodel_kick(delta: float) -> void:
 func _on_weapon_fired() -> void:
 	# The aim ray starts at the camera, not the muzzle, so the crosshair tells
 	# the truth about where the round goes.
-	weapon.hitscan(get_eye_position(), get_look_direction())
+	var origin := get_eye_position()
+	var direction := get_look_direction()
+
+	# Offline, this player is the whole authority and the raycast runs right
+	# here. Online, the host is the authority for what a shot hit, so the ray
+	# is offered to it instead and the answer comes back. The local weapon has
+	# already debited the round and flashed the muzzle by this point, so the
+	# player still gets instant feedback for their own action; what they do not
+	# get is the right to decide it hit something.
+	if NetworkManager.is_online:
+		request_shot_from_network(origin, direction)
+		return
+
+	weapon.hitscan(origin, direction)
+
+
+## Asks the host to resolve this shot. [b]The client-to-host combat
+## interface.[/b]
+##
+## Public, and named, because it is the seam rather than a private detail: it is
+## what a trigger press calls, and it is what a replay viewer, a turret, or a
+## Chapter 6 ability that fires on somebody's behalf would call. Every one of
+## those wants the same thing - describe an aim, let the authority decide - and
+## none of them wants a local shortcut.
+##
+## The call is [b]not[/b] an RPC annotation on the call site: the host's own
+## player takes the identical path, with the identical validation, as a client's
+## does. Having a separate "trusted" local shortcut would mean the host is
+## playing by different rules from everyone else, and the only way to find out
+## that the validating rules were wrong would be to notice the host behaving
+## differently.
+func request_shot_from_network(origin: Vector3, direction: Vector3) -> void:
+	resolve_incoming_shot.rpc_id(NetworkManager.SERVER_PEER_ID, origin, direction)
+
+
+## The authoritative end of a shot. Reached by RPC from a client, and called
+## directly by the host for its own player.
+##
+## Runs on the server, or it does nothing at all.
+@rpc("any_peer", "call_remote", "reliable")
+func resolve_incoming_shot(origin: Vector3, direction: Vector3) -> void:
+	if not multiplayer.is_server():
+		return
+
+	# A client may only speak for its own body. Without this, any peer could
+	# fire on any other peer's behalf - including making somebody else's player
+	# shoot, which would then be validated against a ray origin the attacker
+	# chose rather than one they were standing at.
+	if multiplayer.get_remote_sender_id() != peer_id:
+		_rejected_shots += 1
+		push_warning("[Combat] peer %d tried to fire player %d's weapon; refused." % [
+			multiplayer.get_remote_sender_id(), peer_id])
+		return
+
+	# A zero-length direction would make `hitscan` normalise a null vector and
+	# either throw or produce a NaN that poisons every later calculation on the
+	# body. Cheap to refuse, so it is refused before anything else looks at it.
+	if direction.length_squared() < 0.000001:
+		_rejected_shots += 1
+		return
+
+	# Rate limit against the weapon's own fire interval, with a small allowance
+	# for the fact that the two machines are not sharing a clock.
+	#
+	# This is not a substitute for the weapon's fire-rate enforcement - the
+	# client already enforces that, and it is the client that owns the magazine.
+	# It is here so the host is not a free damage button for a modified client
+	# that removed the check locally.
+	var now := Time.get_ticks_msec()
+	var interval_ms := 0
+	if weapon != null and weapon.data != null:
+		interval_ms = int(weapon.data.fire_interval * 1000.0)
+	if now - _last_validated_shot_ms < interval_ms - SHOT_CLOCK_TOLERANCE_MS:
+		_rejected_shots += 1
+		return
+	_last_validated_shot_ms = now
+
+	# The origin is checked and then discarded. This is the important one: a
+	# client that could choose its own ray origin could fire from inside a wall
+	# it is not standing in, or from across the map with a direction that only
+	# makes sense from somewhere else entirely. The shot is cast from where the
+	# host believes this player is, so the only thing the client gets to
+	# influence is where they are aiming - which is the part that is genuinely
+	# theirs to decide.
+	var authoritative_origin := get_eye_position()
+	if authoritative_origin.distance_to(origin) > MAX_SHOT_ORIGIN_ERROR:
+		_rejected_shots += 1
+		return
+
+	# The weapon's own hitscan, run by the host, against the host's world. The
+	# damage path from here is identical to Chapter 3's: `hitscan` calls
+	# `Damageable.deal_damage` on whatever it found, and the host's copy of
+	# every player's `apply_damage` is the one that counts.
+	var result := weapon.hitscan(authoritative_origin, direction.normalized())
+	var collider: Object = result.get("collider")
+	var victim := Damageable.find_target(collider)
+	var victim_player := victim as Player
+	var zone := Damageable.resolve_zone(victim, result.get("position", authoritative_origin), collider)
+	var killed := victim_player != null and victim_player.is_dead()
+	var hit_point: Vector3 = result.get("position", authoritative_origin)
+	var hit_normal: Vector3 = result.get("normal", -direction)
+
+	shot_resolved.emit(
+		hit_point, hit_normal, victim_player, zone, killed,
+		peer_id == multiplayer.get_unique_id())
+
+	# Tell the other machines what happened, so they can draw the impact and
+	# the shooter's hit marker. `call_remote` on an authority RPC means the
+	# host does not receive its own message and draw every effect twice.
+	_confirm_shot.rpc(
+		result.get("position", authoritative_origin),
+		result.get("normal", -direction),
+		zone,
+		victim_player.peer_id if victim_player != null else 0,
+		killed,
+		peer_id)
+
+
+## Applies another machine's authoritative verdict about a shot.
+##
+## [param victim_peer_id] is 0 for scenery, which is also the peer id of "nobody"
+## - the two are not being confused here because a peer id of 0 is not a thing
+## ENet hands out.
+##
+## [b]`any_peer` with a sender check, not `authority`.[/b] This node's
+## multiplayer authority is the peer that [b]owns[/b] the body, because that is
+## what `is_multiplayer_authority()` has to mean elsewhere on it. The peer that
+## [b]decides[/b] shots is the host, and for a client's body those are two
+## different peers. An `authority` annotation would mean "only the body's owner
+## may say this happened", so the host could never send a verdict about
+## somebody else's shot - and the failure is silent, because the message is
+## simply dropped. A receiver-side `is_server()` check would have the same
+## problem in another mirror image: the host never receives its own broadcast
+## (that is [code]call_remote[/code]), so the only running copies of this
+## function are on clients, and a check that reads "carry on only if you are
+## the server" would tell every one of them to stop. Which peer sent the
+## message is the question that is actually answerable at this point in the
+## code, and it is the check that preserves the authority.
+##
+## [b]Reliable.[/b] The hit marker and the impact effect are the only
+## user-visible result of pulling the trigger on a connection that is not
+## losing packets, and a dropped verdict reads as "my gun does not work".
+@rpc("any_peer", "call_remote", "reliable")
+func _confirm_shot(point: Vector3, normal: Vector3, zone: int, victim_peer_id: int, killed: bool, shooter_peer_id: int) -> void:
+	# Only the host's word counts. Checked here rather than trusted from the
+	# annotation for the reason above.
+	if multiplayer.get_remote_sender_id() != NetworkManager.SERVER_PEER_ID:
+		return
+	var victim: Player = null
+	if victim_peer_id != 0:
+		victim = NetworkManager.get_player_for(victim_peer_id)
+
+	# The hit marker is the shooter's business. On every other machine this is
+	# somebody else's confirmed hit and drawing a crosshair flash for it would
+	# be a lie about who is shooting.
+	var is_mine := shooter_peer_id == multiplayer.get_unique_id()
+	if is_mine and _hit_marker != null:
+		_hit_marker.flash(zone, killed)
+	shot_resolved.emit(point, normal, victim, zone, killed, is_mine)
 
 
 func _on_recoil_requested(_pitch_degrees: float, _yaw_degrees: float) -> void:
@@ -474,7 +1010,12 @@ func apply_damage(amount: float, _source: Node = null, _zone: Damageable.HitZone
 
 	var removed := state.apply_damage(amount)
 	if removed > 0.0:
+		took_hit.emit(_source, removed, _zone)
 		health_changed.emit(state.health, state.is_alive)
+		# Published before the death check, so a lethal hit still sends the
+		# final health value. `_publish_net_state` is a no-op off the host, so
+		# a client calling apply_damage locally changes only its own screen.
+		_publish_net_state()
 	if not state.is_alive:
 		die(_source)
 	return removed
@@ -508,6 +1049,185 @@ func is_dead() -> bool:
 	return not state.is_alive
 
 
+## Moves a remote body smoothly toward where the network says it is.
+##
+## Three snapshots are kept and the body is drawn at the position the network
+## had one snapshot-interval ago, which is the standard trick for turning a
+## series of discrete updates into continuous motion: you deliberately show
+## slightly stale data, and spend the latency smoothing the gap between
+## updates. One snapshot of history is not enough to interpolate *between*
+## arrivals, and without history at all the body visibly steps.
+##
+## The fallback matters more than the happy path. A body that has received no
+## snapshot yet - or has just spawned and is waiting for the first one - would
+## otherwise be drawn at the world origin, which in this map is the middle of
+## the practice range, so a late joiner appears as a player standing in the
+## targets before their first packet lands.
+func _advance_remote_interpolation(delta: float) -> void:
+	var now := _net_time_now()
+
+	if _snapshot_positions.is_empty():
+		# Waiting for the first snapshot. Hold the spawn point rather than
+		# defaulting to the origin.
+		if not _render_initialised:
+			_render_position = global_position
+			_render_rotation_y = rotation.y
+			_render_initialised = true
+		return
+
+	# Discard snapshots that are older than the window we are interpolating
+	# across. The array is tiny and this runs once per physics tick per remote
+	# body, so a linear pass is cheaper than maintaining a ring buffer and far
+	# easier to read.
+	while _snapshot_times.size() >= 2 \
+			and now - _snapshot_times[0] > TRANSFORM_REPLICATION_SECONDS * REMOTE_SNAPSHOT_HISTORY:
+		_snapshot_times.remove_at(0)
+		_snapshot_positions.remove_at(0)
+
+	var target_position := _snapshot_positions[_snapshot_positions.size() - 1]
+	var target_yaw := rotation.y
+
+	# Interpolate between the two most recent snapshots when we are between
+	# their arrival times, rather than always chasing the newest one. Chasing
+	# the newest one alone is just smoothing, and it introduces a consistent
+	# half-interval of lag on top of the network's own.
+	if _snapshot_times.size() >= 2:
+		var previous_time := _snapshot_times[_snapshot_times.size() - 2]
+		var previous_position := _snapshot_positions[_snapshot_positions.size() - 2]
+		var newest_time := _snapshot_times[_snapshot_times.size() - 1]
+		var span := newest_time - previous_time
+		if span > 0.0001:
+			var t := clampf((now - previous_time) / span, 0.0, 1.0)
+			# Smoothstep rather than linear, so a body does not change direction
+			# with a visible corner at every snapshot boundary.
+			var eased := t * t * (3.0 - 2.0 * t)
+			target_position = previous_position.lerp(target_position, eased)
+
+	# Bounded catch-up, so a body dropped in by a respawn crosses the map
+	# quickly instead of gliding there over several seconds.
+	var to_target := target_position - _render_position
+	var step := REMOTE_CATCHUP_SPEED * delta
+	_render_position += to_target if to_target.length() <= step else to_target.normalized() * step
+
+	_render_rotation_y = lerp_angle(_render_rotation_y, target_yaw, minf(1.0, delta * 12.0))
+	global_position = _render_position
+	rotation.y = _render_rotation_y
+	_render_initialised = true
+
+
+## Seconds since this body started, used to timestamp snapshots.
+##
+## Every snapshot is stamped on arrival and every comparison is made against
+## this same local clock, so the two always agree by construction. Stamping
+## with a wall clock on the sender and comparing against a wall clock on the
+## receiver would be the obvious mistake here, and it is invisible until two
+## machines' clocks happen to be far enough apart to make the interpolation
+## extrapolate backwards.
+var _net_clock: float = 0.0
+
+
+func _net_time_now() -> float:
+	return _net_clock
+
+
+## Records an authoritative transform for a remote body to interpolate towards.
+func record_net_snapshot(position: Vector3) -> void:
+	_snapshot_positions.append(position)
+	_snapshot_times.append(_net_clock)
+	while _snapshot_positions.size() > REMOTE_SNAPSHOT_HISTORY:
+		_snapshot_positions.remove_at(0)
+		_snapshot_times.remove_at(0)
+
+
+## Copies replicated health, team and death into [member state] when they
+## change, and runs the local presentation for a death this machine did not
+## cause.
+##
+## Pushed, not polled: [method _net_state_receive] hands this the host's trio
+## exactly when the host changes something, so it runs once per change and
+## there is nothing to poll. The helper keeps its own guard rails - the team
+## clobber gate below, the death presentation guard - so that a spurious or
+## re-sent value is harmless rather than rely on the caller to be careful.
+func _sync_state_from_network() -> void:
+	# [b]Wait for the host to actually speak before believing any of it.[/b]
+	#
+	# The mirror fields are initialised to safe-looking defaults - full health,
+	# alive, no side - and "no side" is a value the host never sends, because
+	# every player is assigned one before they are spawned. So a body that has
+	# not been told its team yet is distinguishable from a body that was told it
+	# has no team, and the distinction has to be respected.
+	#
+	# Without this, the first physics frame after a remote body spawns reads
+	# `net_team` as [constant Team.Side.NONE], decides the authoritative answer
+	# is "unassigned", and overwrites the side the spawn data already put there.
+	# The result is a body that is correctly on BRAVO in the roster and
+	# correctly grey and unassigned on the machine that draws it, with no error
+	# anywhere - and it gets worse rather than better, because the host's copy
+	# of every client is remote, so every one of them clobbers itself.
+	if not _net_state_received:
+		if net_team == Team.Side.NONE:
+			return
+		_net_state_received = true
+
+	if net_team != state.team:
+		state.assign_team(net_team)
+		# A team can only change before a round starts, but a client does not
+		# know that and must not be relying on a rule it cannot see. Repainting
+		# on the replicated value means a late team assignment is reflected
+		# wherever the host decided it.
+		_apply_team_colour()
+
+	if net_health == state.health and net_alive == state.is_alive:
+		return
+
+	state.health = net_health
+	state.is_alive = net_alive
+
+	if not net_alive:
+		# A death this machine did not cause. [method die] is deliberately not
+		# called: it credits the scoreboard, and the host is the only machine
+		# allowed to do that, or every client would count the same kill. The
+		# presentation - corpse layer, camera fall, weapon lowered - is local
+		# and has to happen anyway, so it is factored out below.
+		_begin_death_presentation(null)
+		return
+
+	health_changed.emit(state.health, true)
+
+
+## Everything [method die] does that is presentation rather than authority.
+##
+## Split out because those are two different jobs with two different owners.
+## The host runs this and also credits the death; a client runs this and
+## credits nothing. Folding them back together would mean a client incrementing
+## a death count it was never entitled to, once per peer that died.
+func _begin_death_presentation(source: Node) -> void:
+	if _is_dying:
+		return
+
+	_is_dying = true
+	_death_tilt = 0.0
+	_death_eye_start = _head.position.y
+	_apply_view()
+
+	velocity = Vector3.ZERO
+	_move_velocity = Vector3.ZERO
+	_sprint_held = false
+	_crouch_held = false
+
+	collision_layer = CollisionLayers.CORPSE
+	_set_weapon_visible(false)
+	# The body mesh is hidden on a living local player because you are standing
+	# inside it. A corpse has no inside, and a corpse nobody can see is a death
+	# that only happened to the victim - so the mesh comes on here, already
+	# tinted with whatever side this player was on.
+	if _body_mesh != null:
+		_body_mesh.visible = true
+		_apply_team_colour()
+	if weapon != null:
+		weapon.cancel_reload()
+
+
 ## Puts the player back on their feet with a full magazine. Used by the test
 ## harness, and by the Chapter 5 round loop.
 func respawn() -> void:
@@ -526,10 +1246,16 @@ func respawn() -> void:
 	_apply_stance()
 	_apply_view()
 
+	# The corpse mesh goes back off for a local player, who is once again
+	# standing inside it. A remote body keeps its own visible on.
+	if _body_mesh != null and not is_network_remote:
+		_body_mesh.visible = false
+
 	_set_weapon_visible(true)
 	if weapon != null:
 		weapon.equip(starting_weapon, self)
 
+	_publish_net_state()
 	health_changed.emit(state.health, true)
 
 
@@ -569,33 +1295,59 @@ func die(source: Node = null) -> void:
 	state.record_death()
 	died.emit(source)
 
-	# Starts the camera fall, and is what freezes the stance and hands the view
-	# over to [method _apply_view]. Set before anything else below reads it.
-	_is_dying = true
-	_death_tilt = 0.0
-	# Captured rather than assumed to be the standing eye height, so a player
-	# shot part way through standing up from a crouch falls from where they
-	# actually were.
-	_death_eye_start = _head.position.y
-	_apply_view()
+	_begin_death_presentation(source)
 
-	# Movement and the trigger stop. Deliberately [b]not[/b] through
-	# set_input_enabled: that flag is the Chapter 4 seam and means "the network
-	# sets this player's transform", which is a completely different question
-	# from "this player is dead". Overloading it would make Chapter 4 unable to
-	# tell a corpse apart from a remote player, and would release the mouse
-	# cursor at the exact moment the player most wants to see where they died.
-	velocity = Vector3.ZERO
-	_move_velocity = Vector3.ZERO
-	_sprint_held = false
-	_crouch_held = false
-
-	collision_layer = CollisionLayers.CORPSE
-	_set_weapon_visible(false)
-	if weapon != null:
-		weapon.cancel_reload()
+	# Only the machine that is authoritative for this body's health writes the
+	# mirrored fields. A client that wrote them here would be sending its own
+	# idea of its health to every other peer, and whichever arrived last would
+	# win - which is the entire failure mode the split authority exists to
+	# prevent.
+	_publish_net_state()
 
 	health_changed.emit(state.health, false)
+
+
+## Copies [member state] into the mirror fields and broadcasts them.
+##
+## Host-only by contract. Called on every health change, and nothing else, so
+## there is one place where "the game decided this player is at 40" becomes
+## "the network is told this player is at 40".
+func _publish_net_state() -> void:
+	if not multiplayer.is_server():
+		return
+	net_health = state.health
+	net_alive = state.is_alive
+	net_team = state.team
+	NetworkManager.players.record_health(peer_id, state.health, state.is_alive)
+	_net_state_receive.rpc(net_health, net_alive, net_team)
+
+
+## Applies the host's authoritative word about a body's health, team and death.
+##
+## This is the receiving half of [method _publish_net_state]. It is a
+## change-driven push rather than a synchroniser poll, because - as the notes
+## beside [method configure_for_network] record - a [MultiplayerSynchronizer]
+## with server authority cannot carry a client-owned body's state back to the
+## client that owns it.
+##
+## [b]`any_peer` with a sender check, not `authority`.[/b] This node's
+## multiplayer authority is the peer that [b]owns[/b] the body, because that is
+## what `is_multiplayer_authority()` has to mean elsewhere on it - for input,
+## for the transform synchroniser, for the shot handshake. The peer that
+## [b]decides[/b] the body's health is the host, and for a client's body those
+## are two different peers. An `authority` annotation would mean "only the
+## body's owner may write its health", which hands the client exactly the
+## authority this chapter exists to take away. Sender identity is the
+## verifiable thing, and it is verified.
+@rpc("any_peer", "call_remote", "reliable")
+func _net_state_receive(health_value: int, alive: bool, side: int) -> void:
+	if multiplayer.get_remote_sender_id() != NetworkManager.SERVER_PEER_ID:
+		return
+
+	net_health = health_value
+	net_alive = alive
+	net_team = side
+	_sync_state_from_network()
 
 
 ## Adds a recoil kick to the view. Degrees, positive lifts the camera.
@@ -783,6 +1535,43 @@ func _physics_process(delta: float) -> void:
 	_read_input()
 	_update_combat(delta)
 	_update_viewmodel_kick(delta)
+
+	# A remote body is not simulated here. It did the moving on the machine that
+	# owns it and the transform arrived over the network, so running the
+	# Chapter 2 controller on it as well would mean two things writing
+	# `global_position` sixty times a second - the controller's gravity and the
+	# synchroniser's arrival - and the visible result is a body that jitters
+	# where it stands and slowly sinks through the floor.
+	#
+	# The early return is placed after the combat update on purpose. Death
+	# presentation still has to run on a remote body, because a client learns
+	# that somebody died from a state RPC rather than from a local
+	# apply_damage call, and skipping this would leave remote corpses standing
+	# upright forever. (The RPC itself is applied where it arrives, in
+	# [method _net_state_receive], which calls [method _begin_death_presentation]
+	# through the ordinary state path - it does not need this loop to reach it.)
+	if is_network_remote:
+		_net_clock += delta
+		_advance_remote_interpolation(delta)
+		return
+
+	# Health, team and death are the host's and the host alone. The RPC handling
+	# in [method _net_state_receive] runs on [b]every body on every machine
+	# except the host's[/b] - including this machine's own player.
+	#
+	# That last part is the one that is easy to miss, and it is the difference
+	# between a working chapter and one that appears to work. A client's own
+	# body is not a remote body, so the `is_network_remote` branch above never
+	# reached it, so the client kept its own optimistic guess of its health
+	# forever: the host thought it was at 60, the player was convinced it was at
+	# 100, and taking damage appeared to do nothing at all. The whole point of
+	# host authority is that the client is told the truth about itself, and
+	# "itself" is precisely the body the other code path skips. (The one
+	# machine that never receives the RPC is the host: [code]call_remote[/code]
+	# does not echo to the caller, and the host does not need to be told what it
+	# already decided.)
+	#
+	# Nothing is polled here. The RPC handler applies the host's trio itself.
 
 	_apply_horizontal_motion(delta)
 	_apply_vertical_motion(delta)
