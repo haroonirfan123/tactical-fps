@@ -1,6 +1,9 @@
-[gd_scene load_steps=5 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="Script" path="res://scripts/player/player.gd" id="1_player"]
+[ext_resource type="PackedScene" path="res://scenes/weapons/rifle.tscn" id="2_rifle"]
+[ext_resource type="PackedScene" path="res://scenes/fx/weapon_fx.tscn" id="3_fx"]
+[ext_resource type="PackedScene" path="res://scenes/ui/hit_marker.tscn" id="4_hitmarker"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape_stand"]
 radius = 0.35
@@ -16,7 +19,7 @@ transparency = 1
 
 [node name="Player" type="CharacterBody3D"]
 collision_layer = 2
-collision_mask = 1
+collision_mask = 13
 floor_snap_length = 0.4
 safe_margin = 0.01
 script = ExtResource("1_player")
@@ -38,3 +41,13 @@ current = true
 fov = 90.0
 near = 0.05
 far = 500.0
+
+[node name="WeaponMount" type="Node3D" parent="Head"]
+
+[node name="Weapon" parent="Head/WeaponMount" instance=ExtResource("2_rifle")]
+
+[node name="WeaponFx" parent="Head/WeaponMount" instance=ExtResource("3_fx")]
+
+[node name="HitMarkerLayer" type="CanvasLayer" parent="."]
+
+[node name="HitMarker" parent="HitMarkerLayer" instance=ExtResource("4_hitmarker")]

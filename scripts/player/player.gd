@@ -27,6 +27,28 @@ extends CharacterBody3D
 ## computed from a level heading. If the body were pitched, walking downhill
 ## would steer you into the ground.
 
+# --- Signals ------------------------------------------------------------
+
+## Health changed, or the player died. [param alive] is false on the frame
+## health reaches zero. The HUD reads this; Chapter 5's scoreboard will too.
+signal health_changed(health: int, alive: bool)
+
+## The player was eliminated. [param source] is whatever did it, which may be
+## null - falling out of the world should still produce a death.
+signal died(source: Node)
+
+## Emitted when a weapon is equipped or removed. The HUD re-reads ammo on this
+## rather than polling.
+signal weapon_changed(weapon: Weapon)
+
+## A reload started or finished. [param duration] is the full reload time when
+## one started and zero when one finished. Separate from the weapon's own signal
+## so the HUD does not have to hold a reference to the weapon to know.
+signal reloading_changed(reloading: bool, duration: float)
+
+## The trigger was pulled on an empty magazine.
+signal dry_fired
+
 # --- Body dimensions ---------------------------------------------------
 # Metres. The capsule's origin is at the player's feet, so a shape of height h
 # sits with its centre at y = h / 2.
@@ -148,9 +170,88 @@ enum MovementState {
 ## because there is one per player. Chapter 3 reads health from here.
 var state: PlayerState = PlayerState.new()
 
+# --- Combat (Chapter 3) -------------------------------------------------
+
+## The equipped weapon, or null when this player has nothing in their hands.
+## The player owns the weapon in the sense that it is a child of this node and
+## travels with it; it owns none of the weapon's behaviour. See [Weapon].
+@onready var weapon: Weapon = $Head/WeaponMount/Weapon
+
+## The headshot band, as a fraction of the player's current height measured up
+## from the feet. The top fifth of the capsule is a headshot.
+##
+## [b]A height band rather than a second collider, on purpose.[/b] A separate
+## head collider would have to be moved every time the crouch height changed,
+## and any frame where the two disagreed would leave the player with a hole in
+## the head or a head that was floating. Deriving the band from
+## [method get_current_height] - the same number the capsule is resized from -
+## means it cannot fall out of step with the crouch, and it costs no extra
+## collision shape, which keeps the Chapter 2 step-up and crouch-under-a-ceiling
+## behaviour exactly as it was.
+@export_range(0.05, 0.5, 0.01) var head_hit_fraction: float = 0.18
+
+## How fast the camera returns to where the player was actually aiming after
+## recoil, in degrees per second. The weapon decides [b]how much[/b] kick a shot
+## has; this decides [b]how fast[/b] it goes away, because that is a property of
+## the player's own view rather than of any one weapon.
+@export var recoil_recovery_degrees: float = 55.0
+
+## The furthest the camera can be pushed off the player's true aim by recoil
+## alone, in degrees. A cap rather than an unbounded accumulator, so a long burst
+## cannot walk the view somewhere the player cannot pull it back from.
+@export var max_recoil_pitch_degrees: float = 6.0
+@export var max_recoil_yaw_degrees: float = 3.0
+
+## How long the camera takes to fall to the floor after death, in seconds.
+@export var death_camera_fall_seconds: float = 1.1
+
+## How far above the floor the camera comes to rest, in metres.
+@export var death_camera_height: float = 0.35
+
+## The player's true aim pitch, in radians, as the mouse last left it.
+##
+## [b]Separated from the head's rotation on purpose.[/b] Recoil is an [b]offset
+## applied on top of[/b] this value, never an addition to it, which is what keeps
+## the player's own aim from being destroyed: recovery always returns the view to
+## exactly the pitch the player chose, so a twenty-round burst leaves the
+## crosshair on the pixel it started on. Folding recoil into the head's rotation
+## instead would make the view drift permanently upward and the player would have
+## to fight it back down - the "recoil you cannot control" the chapter rules out.
+var _look_pitch: float = 0.0
+
+## Current recoil offset, in degrees, applied on top of [member _look_pitch].
+var _recoil_pitch: float = 0.0
+var _recoil_yaw: float = 0.0
+
+## How far through the death camera fall the player is, 0 to 1.
+var _death_tilt: float = 0.0
+
+## Where the head was at the moment of death, so the fall starts from wherever
+## the player actually was - standing, or already part way down from a crouch -
+## rather than from an assumed standing height.
+var _death_eye_start: float = 0.0
+
+## Set by [method die] so [method _update_stance] stops fighting it and the
+## camera cannot spring back up.
+var _is_dying: bool = false
+
+## Where the weapon mount sits when it is not recoiling, captured from the
+## scene. Recoil is an offset from here rather than an accumulated addition, so
+## twenty rounds of automatic fire cannot walk the gun slowly into the player's
+## face.
+var _viewmodel_rest: Vector3 = Vector3.ZERO
+var _viewmodel_kick: float = 0.0
+
+## How fast the viewmodel returns to rest after a shot, in kicks per second. A
+## constant rather than a per-weapon number because it is a property of the
+## player's hands, not of any particular gun.
+const VIEWMODEL_KICK_RECOVERY := 12.0
+
 @onready var _collision: CollisionShape3D = $Collision
 @onready var _head: Node3D = $Head
 @onready var _camera: Camera3D = $Head/Camera3D
+@onready var _weapon_mount: Node3D = $Head/WeaponMount
+@onready var _hit_marker: HitMarker = $HitMarkerLayer/HitMarker
 
 ## Optional translucent capsule used only to make the collider visible while
 ## developing. Hidden by default, and parented to the collision shape so it
@@ -195,8 +296,119 @@ func _ready() -> void:
 	_camera.current = true
 	_camera.fov = GameConfig.field_of_view
 
+	if _weapon_mount != null:
+		_viewmodel_rest = _weapon_mount.position
+
+	_equip_weapon()
+
+	# The head's rotation is derived, so it is written once here rather than
+	# waiting for the first physics frame with a stale zero.
+	_apply_view()
+
 	if capture_mouse_on_ready and input_enabled:
 		capture_mouse(true)
+
+
+## Puts the starting weapon in this player's hands and wires up everything the
+## weapon reports.
+##
+## [b]The signal wiring is here, in the player, not inside the weapon.[/b] The
+## weapon never calls the player directly - it emits, and this node decides what
+## that means. That is what lets a remote player in Chapter 4 hold the same
+## weapon scene with a different set of listeners, or none.
+func _equip_weapon() -> void:
+	if weapon == null:
+		return
+
+	# The shared [WeaponData] instance is handed to the weapon by reference and
+	# never written to, so six players in a match all firing the Kestrel cannot
+	# change each other's spread.
+	weapon.equip(starting_weapon, self)
+
+	weapon.fired.connect(_on_weapon_fired)
+	weapon.recoil_requested.connect(_on_recoil_requested)
+	weapon.hit_confirmed.connect(_on_hit_confirmed)
+	weapon.reload_started.connect(_on_reload_started)
+	weapon.reload_finished.connect(_on_reload_finished)
+	weapon.dry_fired.connect(_on_dry_fired)
+
+	weapon_changed.emit(weapon)
+
+	# A player who dies mid-reload must not come back with a magazine that
+	# silently refilled.
+	if not state.is_alive:
+		_set_weapon_visible(false)
+
+
+## Hides or shows the weapon in the player's hands. On death the gun drops out
+## of frame rather than vanishing instantly, because a player who can still see
+## a magazine counting down while they are dead is being told a lie.
+func _set_weapon_visible(visible_now: bool) -> void:
+	if _weapon_mount == null:
+		return
+	_weapon_mount.visible = visible_now
+	# The recoil offset is reset with it, or the next equip comes back with the
+	# gun jammed half way back.
+	_viewmodel_kick = 0.0
+	_weapon_mount.position = _viewmodel_rest
+
+
+## Recovers the viewmodel's recoil kick. Purely cosmetic, and driven from here
+## rather than from the weapon because the mount is a node on the player.
+func _update_viewmodel_kick(delta: float) -> void:
+	if _weapon_mount == null:
+		return
+	if _viewmodel_kick <= 0.0:
+		return
+
+	_viewmodel_kick = maxf(_viewmodel_kick - delta * VIEWMODEL_KICK_RECOVERY, 0.0)
+	var distance := 0.0
+	if weapon != null and weapon.data != null:
+		distance = weapon.data.viewmodel_kick
+	# Positive z is back towards the camera, which is what "kicking" means.
+	_weapon_mount.position = _viewmodel_rest + Vector3(0.0, 0.0, _viewmodel_kick * distance)
+
+
+# --- Weapon signal handlers ---------------------------------------------
+# All of these are one-liners. That is the payoff of the weapon emitting
+# instead of calling: the player decides what a shot means for a player, and
+# nothing in the weapon knows this class exists.
+
+func _on_weapon_fired() -> void:
+	# The aim ray starts at the camera, not the muzzle, so the crosshair tells
+	# the truth about where the round goes.
+	weapon.hitscan(get_eye_position(), get_look_direction())
+
+
+func _on_recoil_requested(_pitch_degrees: float, _yaw_degrees: float) -> void:
+	add_recoil(_pitch_degrees, _yaw_degrees)
+	_apply_view()
+	_viewmodel_kick = 1.0
+
+
+func _on_hit_confirmed(killed: bool, zone: int, _health_left: int) -> void:
+	if _hit_marker != null:
+		_hit_marker.flash(zone, killed)
+
+
+func _on_reload_started(duration: float) -> void:
+	reloading_changed.emit(true, duration)
+
+
+func _on_reload_finished() -> void:
+	reloading_changed.emit(false, 0.0)
+
+
+func _on_dry_fired() -> void:
+	# Nothing visual yet - Chapter 8's job. The signal exists so there is
+	# somewhere obvious to put the click, and so a test can prove an empty
+	# weapon is distinguishable from a working one.
+	dry_fired.emit()
+
+
+## The weapon every player starts a match holding. Chapter 5 replaces this with
+## whatever the buy system hands out.
+@export var starting_weapon: WeaponData = preload("res://data/weapons/kestrel.tres")
 
 
 # --- Public API --------------------------------------------------------
@@ -212,7 +424,7 @@ func get_movement_state() -> MovementState:
 		return MovementState.AIRBORNE
 	if _stance < 0.5:
 		return MovementState.CROUCHING
-	if _sprint_held and _is_moving():
+	if _sprint_held and not _sprint_blocked() and _is_moving():
 		return MovementState.SPRINTING
 	return MovementState.NORMAL
 
@@ -246,6 +458,169 @@ func is_crouching() -> bool:
 	return get_movement_state() == MovementState.CROUCHING
 
 
+# --- Health and damage (Chapter 3) --------------------------------------
+
+## Takes damage and returns how much health was actually removed, or 0.0 if
+## nothing happened.
+##
+## [b]This is the whole of the player's damage surface.[/b] A weapon calls it
+## through [method Damageable.deal_damage]; the Chapter 3 turret calls it
+## through the same static; Chapter 4's replicated shots call it on the host
+## after validation. Nothing else has a way in, and nothing else needs to -
+## which is precisely what stops a client from deciding its own health.
+func apply_damage(amount: float, _source: Node = null, _zone: Damageable.HitZone = Damageable.HitZone.BODY) -> float:
+	if not state.is_alive or amount <= 0.0:
+		return 0.0
+
+	var removed := state.apply_damage(amount)
+	if removed > 0.0:
+		health_changed.emit(state.health, state.is_alive)
+	if not state.is_alive:
+		die(_source)
+	return removed
+
+
+## Reports which part of the player was hit, from where on the capsule the
+## round landed. See [member head_hit_fraction] for why this is a band and not
+## a second collider.
+##
+## [param collider] is ignored. A player has exactly one collider, so there is
+## nothing to disambiguate - which is the whole reason the player's zones are
+## derived and the practice target's are not.
+func resolve_hit_zone(point: Vector3, _collider: Object = null) -> Damageable.HitZone:
+	# Measured from the feet, and against the current height, so a crouched
+	# player's head band is 0.2 m off the floor rather than 0.32 m. Using an
+	# absolute height here would make the head unreachable while crouched.
+	var up_the_body := (point.y - global_position.y) / maxf(get_current_height(), 0.001)
+	return Damageable.HitZone.HEAD if up_the_body >= 1.0 - head_hit_fraction \
+		else Damageable.HitZone.BODY
+
+
+func get_health() -> int:
+	return state.health
+
+
+func get_max_health() -> int:
+	return PlayerState.MAX_HEALTH
+
+
+func is_dead() -> bool:
+	return not state.is_alive
+
+
+## Puts the player back on their feet with a full magazine. Used by the test
+## harness, and by the Chapter 5 round loop.
+func respawn() -> void:
+	state.respawn()
+	_is_dying = false
+	_death_tilt = 0.0
+	_recoil_pitch = 0.0
+	_recoil_yaw = 0.0
+
+	# Back on the player layer before the body is standing up again, or the
+	# corpse stays intangible and shots pass through it while it is rising.
+	collision_layer = CollisionLayers.PLAYER
+	collision_mask = CollisionLayers.PLAYER_BODY_MASK
+
+	_stance = 1.0
+	_apply_stance()
+	_apply_view()
+
+	_set_weapon_visible(true)
+	if weapon != null:
+		weapon.equip(starting_weapon, self)
+
+	health_changed.emit(state.health, true)
+
+
+## Enters the dead state: control off, movement stopped, camera on the way to
+## the floor, weapon lowered, and the body moved to the corpse layer.
+##
+## [b]The body stays in the scene.[/b] Removing it would be easier and is the
+## wrong call - the chapter's own note about not spawning a duplicate Player
+## applies to the corpse too, and Chapter 5 needs an eliminated player to remain
+## a thing that is present in the world rather than a hole where someone was.
+##
+## [b]The corpse layer, not the player layer.[/b] A dead player has to stay
+## solid - it blocks movement, it can be shot for effect - but it must stop
+## being a valid combatant, or a corpse would be an aim target and would keep
+## absorbing headshots. Those are different questions, so it is a different
+## layer. See [constant CollisionLayers.CORPSE].
+func die(source: Node = null) -> void:
+	# Guarded on [member _is_dying], NOT on [member PlayerState.is_alive].
+	#
+	# The obvious guard - "if not is_alive, return" - is wrong here, and silently
+	# so. The usual route into this function is [method apply_damage], and
+	# [method PlayerState.apply_damage] sets [code]is_alive = false[/code] the
+	# moment health reaches zero, before this is ever called. So the guard would
+	# always be true on entry and the entire death sequence - corpse layer, camera
+	# fall, weapon lowered, scoreboard credit - would never run. The body would
+	# report itself dead and carry on standing up. This is the same trap
+	# [method PlayerState.record_death] already had to be given its own guard for;
+	# reaching zero health and being *counted* are separate concerns and need
+	# separate flags.
+	if _is_dying:
+		return
+
+	# Entered by routing through the state first: apply_damage above may have
+	# already dropped health to zero, and this is the one place that is allowed
+	# to notice.
+	state.is_alive = false
+	state.record_death()
+	died.emit(source)
+
+	# Starts the camera fall, and is what freezes the stance and hands the view
+	# over to [method _apply_view]. Set before anything else below reads it.
+	_is_dying = true
+	_death_tilt = 0.0
+	# Captured rather than assumed to be the standing eye height, so a player
+	# shot part way through standing up from a crouch falls from where they
+	# actually were.
+	_death_eye_start = _head.position.y
+	_apply_view()
+
+	# Movement and the trigger stop. Deliberately [b]not[/b] through
+	# set_input_enabled: that flag is the Chapter 4 seam and means "the network
+	# sets this player's transform", which is a completely different question
+	# from "this player is dead". Overloading it would make Chapter 4 unable to
+	# tell a corpse apart from a remote player, and would release the mouse
+	# cursor at the exact moment the player most wants to see where they died.
+	velocity = Vector3.ZERO
+	_move_velocity = Vector3.ZERO
+	_sprint_held = false
+	_crouch_held = false
+
+	collision_layer = CollisionLayers.CORPSE
+	_set_weapon_visible(false)
+	if weapon != null:
+		weapon.cancel_reload()
+
+	health_changed.emit(state.health, false)
+
+
+## Adds a recoil kick to the view. Degrees, positive lifts the camera.
+##
+## Called by the weapon, which knows how much kick the weapon has. The
+## [member max_recoil_pitch_degrees] cap lives here because it is a limit on how
+## far the [b]player's view[/b] may be displaced, not a property of any gun.
+func add_recoil(pitch_degrees: float, yaw_degrees: float) -> void:
+	if state.is_alive:
+		_recoil_pitch = minf(_recoil_pitch + pitch_degrees, max_recoil_pitch_degrees)
+		_recoil_yaw = clampf(_recoil_yaw + yaw_degrees, -max_recoil_yaw_degrees, max_recoil_yaw_degrees)
+
+
+## How far the view is currently displaced by recoil, in degrees. Zero when the
+## view is where the player is actually aiming.
+func get_recoil_offset() -> Vector2:
+	return Vector2(_recoil_pitch, _recoil_yaw)
+
+
+## The pitch the player is actually aiming at, in radians, ignoring recoil. The
+## test harness checks that a burst leaves this unchanged.
+func get_look_pitch() -> float:
+	return _look_pitch
+
+
 ## Turns keyboard and mouse control on or off. Chapter 4 calls this with
 ## false for every player it is not authoritative for.
 func set_input_enabled(enabled: bool) -> void:
@@ -273,7 +648,10 @@ func teleport_to(point: Vector3, facing_yaw: float = 0.0) -> void:
 	velocity = Vector3.ZERO
 	_move_velocity = Vector3.ZERO
 	rotation.y = facing_yaw
-	_head.rotation.x = 0.0
+	_look_pitch = 0.0
+	_recoil_pitch = 0.0
+	_recoil_yaw = 0.0
+	_apply_view()
 	global_position = point
 	# Cleared deliberately. The floor flag still reads true for one frame after
 	# the move, and _apply_vertical_motion would spend that frame refilling the
@@ -296,6 +674,11 @@ func _unhandled_input(event: InputEvent) -> void:
 	# Looking around only makes sense with the mouse captured. Checking here
 	# rather than trusting the mouse mode means an alt-tab back into the
 	# window does not immediately start spinning the camera.
+	#
+	# Allowed while dead, unlike movement and firing. Being killed should not
+	# take the camera away at the moment the player is trying to see what got
+	# them - and the pitch is clamped the same way as always, so nothing about
+	# the dead state can drive the view somewhere it should not.
 	if event is InputEventMouseMotion and is_mouse_captured():
 		_look(event as InputEventMouseMotion)
 
@@ -323,13 +706,83 @@ func _look(motion: InputEventMouseMotion) -> void:
 		pitch_delta = -pitch_delta
 
 	var limit := deg_to_rad(pitch_limit_degrees)
-	_head.rotation.x = clampf(_head.rotation.x + pitch_delta, -limit, limit)
+	_look_pitch = clampf(_look_pitch + pitch_delta, -limit, limit)
+	_apply_view()
+
+
+## Writes the head's actual rotation from the player's true aim, the current
+## recoil offset, and the death fall.
+##
+## Every camera angle in this game comes out of this one function. The head's
+## [member Node3D.rotation] is [b]output, never input[/b] - nothing else writes
+## to it - which is what guarantees that recoil cannot permanently redirect the
+## view and that the death fall cannot be undone by a crouch command.
+func _apply_view() -> void:
+	var pitch := _look_pitch
+
+	if _is_dying:
+		pitch = lerpf(pitch, deg_to_rad(78.0), _death_tilt)
+
+	# Recoil subtracts: a positive kick lifts the camera, and a positive x
+	# rotation looks down in Godot's right-handed Y-up basis.
+	_head.rotation.x = clampf(pitch - deg_to_rad(_recoil_pitch), -deg_to_rad(100.0), deg_to_rad(100.0))
+	_head.rotation.z = lerpf(_head.rotation.z, deg_to_rad(_recoil_yaw) * 0.6, 0.5)
+	_head.rotation.y = deg_to_rad(_recoil_yaw) * 0.4
+
+
+## Recovers recoil, advances the death fall, and drives the weapon.
+func _update_combat(delta: float) -> void:
+	# Recoil recovery runs even while dead, so a player killed mid-burst does
+	# not leave the view stuck off-aim when they respawn.
+	if _recoil_pitch > 0.0:
+		_recoil_pitch = maxf(_recoil_pitch - recoil_recovery_degrees * delta, 0.0)
+	if _recoil_yaw != 0.0:
+		_recoil_yaw = move_toward(_recoil_yaw, 0.0, recoil_recovery_degrees * delta)
+
+	if _is_dying and _death_tilt < 1.0:
+		_death_tilt = minf(_death_tilt + delta / maxf(death_camera_fall_seconds, 0.01), 1.0)
+		# The camera sinks to the floor. The body's own capsule is left alone,
+		# so the corpse is still a full-height obstacle and still gets shot.
+		# Driven straight from the death timer, rather than approached with a
+		# lerp toward a moving target.
+		#
+		# The lerp version is the obvious way to write a "sink to the floor",
+		# and it has two problems. It is exponential, so it is still visibly
+		# short of the target when the fall should be over - a body left with
+		# its eyes at chest height a full second after dying, because each
+		# frame only closed a fraction of whatever was left. And because it
+		# reads the head's current height every frame, where the camera came
+		# to rest depended on the frame rate. Deriving the height from a 0-to-1
+		# timer means the camera is provably at [member death_camera_height]
+		# when the timer reaches 1, at any frame rate.
+		#
+		# The body capsule is deliberately left at its standing height, so the
+		# corpse is still a full-height obstacle and still gets shot.
+		_head.position.y = lerpf(_death_eye_start, death_camera_height, ease(_death_tilt, 0.7))
+		_apply_view()
+
+	if weapon == null:
+		return
+
+	# The trigger is read here and nowhere else. The player owns the input
+	# switch, so a remote player with input off holds a weapon that cannot fire
+	# and the weapon itself never has to know the word "input".
+	var can_trigger := _controls_active()
+	weapon.update_trigger(
+		can_trigger and Input.is_action_pressed(&"fire"),
+		can_trigger and Input.is_action_just_pressed(&"fire"),
+		delta)
+
+	if can_trigger and Input.is_action_just_pressed(&"reload"):
+		weapon.try_reload()
 
 
 # --- Movement ----------------------------------------------------------
 
 func _physics_process(delta: float) -> void:
 	_read_input()
+	_update_combat(delta)
+	_update_viewmodel_kick(delta)
 
 	_apply_horizontal_motion(delta)
 	_apply_vertical_motion(delta)
@@ -357,7 +810,7 @@ func _physics_process(delta: float) -> void:
 
 
 func _read_input() -> void:
-	if not input_enabled:
+	if not _controls_active():
 		_sprint_held = false
 		_crouch_held = false
 		return
@@ -365,11 +818,23 @@ func _read_input() -> void:
 	_crouch_held = Input.is_action_pressed(&"crouch")
 
 
+## Whether this player's own input should move and fire them right now.
+##
+## [b]Two different questions, and conflating them is a trap for Chapter
+## 4.[/b] [member input_enabled] means "the network owns this player's
+## transform" - false for every player except the one this machine controls.
+## Being alive means "this player has a body that responds to input". A remote
+## corpse and a local corpse are both dead; only one of them is remote, and
+## Chapter 4 needs to be able to say which.
+func _controls_active() -> bool:
+	return input_enabled and state.is_alive
+
+
 ## Current movement input in world space, already rotated into the player's
 ## heading. [member _head] holds all the pitch, so the body basis is yaw-only
 ## and this cannot tilt the player off vertical.
 func _wish_direction() -> Vector3:
-	if not input_enabled:
+	if not _controls_active():
 		return Vector3.ZERO
 	var input := Input.get_vector(&"move_left", &"move_right", &"move_forward", &"move_backward")
 	if input == Vector2.ZERO:
@@ -388,15 +853,44 @@ func _target_speed() -> float:
 	# slower speed is the one that must not be bypassed.
 	if _stance < 0.5:
 		return crouch_speed
-	if _sprint_held:
+	if _sprint_held and not _sprint_blocked():
 		return sprint_speed
-	return walk_speed
+	return walk_speed * _weapon_speed_multiplier()
+
+
+## The movement penalty of whatever is in the player's hands.
+##
+## Read from the weapon's [WeaponData] rather than hard-coded, so the Chapter 5
+## buy system changing what you are carrying changes how you move with no
+## change here at all. A missing weapon means no penalty, so a player with empty
+## hands walks at the full Chapter 2 speed.
+func _weapon_speed_multiplier() -> float:
+	if weapon == null or weapon.data == null:
+		return 1.0
+	return weapon.data.move_speed_multiplier
+
+
+## Whether the equipped weapon refuses to be sprinted with.
+func _sprint_blocked() -> bool:
+	return weapon != null and weapon.data != null and weapon.data.blocks_sprint
 
 
 ## Steers horizontal velocity toward the target speed. One place decides how
 ## fast the player speeds up and slows down, so acceleration and deceleration
 ## can never disagree.
 func _apply_horizontal_motion(delta: float) -> void:
+	# A dead body stops on the same frame it dies rather than coasting to a halt.
+	#
+	# The usual path would be a corpse decelerating over several frames at
+	# 70 m/s^2, which from a sprint is most of a second of sliding along the
+	# floor. That reads as a body still being pushed by something, and it lets a
+	# corpse drift out of the cover it died behind. Hard stop instead.
+	if not state.is_alive:
+		_move_velocity = Vector3.ZERO
+		velocity.x = 0.0
+		velocity.z = 0.0
+		return
+
 	var direction := _wish_direction()
 	var target := direction * _target_speed()
 
@@ -431,7 +925,7 @@ func _apply_vertical_motion(delta: float) -> void:
 
 func _try_jump() -> void:
 	_last_jump_was_refused = false
-	if not input_enabled or not Input.is_action_just_pressed(&"jump"):
+	if not _controls_active() or not Input.is_action_just_pressed(&"jump"):
 		return
 	# Grounded, or still inside the coyote window. Never both, so there is no
 	# way to get a second jump out of one press.
@@ -508,6 +1002,12 @@ func _try_step_up(horizontal: Vector3) -> bool:
 ## Moves the body between standing and crouched, and refuses to stand up if
 ## there is a ceiling in the way.
 func _update_stance(delta: float) -> void:
+	# Frozen while dead. A corpse should keep the collider height it died with;
+	# letting it stand back up would make a body that was shot in the head rise
+	# to full height afterwards, which is a lie about where the player is.
+	if _is_dying:
+		return
+
 	if _crouch_held and _stance > 0.0:
 		_stance = move_toward(_stance, 0.0, stance_change_speed * delta)
 	elif not _crouch_held and _stance < 1.0:
@@ -529,7 +1029,13 @@ func _apply_stance() -> void:
 	var shape := _collision.shape as CapsuleShape3D
 	shape.height = maxf(height, body_radius * 2.0 + 0.001)
 	_collision.position.y = shape.height * 0.5
-	_head.position.y = lerpf(crouch_eye_height, stand_eye_height, _stance)
+
+	# Skipped while dead. The camera's height belongs to the death fall at that
+	# point, and _update_stance runs after _update_combat every frame - so
+	# writing it here would put the player straight back on their feet and start
+	# the whole fall over, every frame, forever.
+	if not _is_dying:
+		_head.position.y = lerpf(crouch_eye_height, stand_eye_height, _stance)
 
 	# Keep the development capsule the same size as the collider, so it is
 	# still an honest picture of the collision when someone enables it.
@@ -556,9 +1062,22 @@ func _can_stand() -> bool:
 
 ## One-line summary for the debug overlay.
 func debug_line() -> String:
-	return "%s  %s  v=%5.1f m/s  y=%5.2f" % [
+	return "%s  h=%4.2f  v=%5.1f m/s  y=%5.2f  HP %3d  %s" % [
 		state_name(get_movement_state()),
-		"h=%4.2f" % get_current_height(),
+		get_current_height(),
 		Vector2(velocity.x, velocity.z).length(),
 		global_position.y,
+		state.health,
+		weapon.debug_line() if weapon != null else "unarmed",
+	]
+
+
+## Second line for the debug overlay: aim and recoil, which are the two numbers
+## a Chapter 3 bug almost always turns out to be about.
+func debug_line_combat() -> String:
+	return "aim %+6.1f deg   recoil %+5.2f / %+5.2f   dead_tilt %.2f" % [
+		rad_to_deg(_look_pitch),
+		_recoil_pitch,
+		_recoil_yaw,
+		_death_tilt,
 	]
