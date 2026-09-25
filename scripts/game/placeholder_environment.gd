@@ -18,9 +18,11 @@ extends Node3D
 ##
 ## The generated groups, in the order they are built:
 ## [codeblock]
-## Cover - chest-high blocks to walk around and hide behind
-## Ramp  - one sloped slab, to prove the controller follows sloping ground
-## Steps - a short staircase, to prove the step-up logic
+## Cover     - chest-high blocks to walk around and hide behind
+## Ramp      - one sloped slab, to prove the controller follows sloping ground
+## Steps     - a short staircase, to prove the step-up logic
+## Overhang  - a low slab to crouch under
+## Range     - Chapter 3: practice targets, a backstop, a hostile turret
 ## [/codeblock]
 
 ## Cover block layout. Each entry is [code][centre, size, yaw_degrees][/code].
@@ -81,12 +83,66 @@ const COVER_COLOUR := Color(0.52, 0.54, 0.57)
 ## which geometry exists to be tested and which exists to be played around.
 const TEST_COLOUR := Color(0.45, 0.62, 0.48)
 
+# --- Combat range (Chapter 3) -------------------------------------------
+# Laid out in the one stretch of the arena that no other generated group
+# occupies: x -10..12, z 6..14. Every cover block, the ramp, the stairs and the
+# overhang are outside that box, which is checked by hand rather than asserted -
+# a test for "nothing else is here" would be more machinery than the fact is
+# worth, and Chapter 7 deletes the lot.
+#
+# The layout is north-facing, so the player walks up the range from the spawn at
+# z = 24:
+#
+# [codeblock]
+#   z = 13   Turret       hostile, shoots back so combat runs both ways
+#   z =  9   Targets x3   two with a body only, one for headshot practice
+#   z =  6   Backstop     the obstacle: rounds that miss stop here
+#   z = 16   (Chapter 1 cover wall) - what the player is behind at spawn
+# [/codeblock]
+#
+# The Chapter 1 cover wall at z = 16 is deliberately left between the spawn and
+# the range. It means the player has to move to fight rather than shooting from
+# where they stood up, and it means the turret's line of sight to the spawn is
+# blocked - so walking into the open is a decision, which is the only thing the
+# turret is for.
+
+## Where the three targets stand, and which of them has a real head collider.
+## Every third target is a [PracticeTarget] either way; the difference is that
+## one of these three also has a [code]Head[/code] body to shoot, so the
+## collider-based hit zone is exercised against a known-good target rather than
+## only against scenery.
+const TARGET_SPOTS := [
+	[Vector3(-3.5, 0.0, 9.0), false],
+	[Vector3(0.0, 0.0, 9.0), false],
+	[Vector3(3.5, 0.0, 9.0), true],
+]
+
+## The wall behind the targets. Rounds that miss a target hit this instead of
+## flying off into the apron, which is the point of having an obstacle at all.
+const BACKSTOP_CENTRE := Vector3(0.0, 0.0, 6.0)
+const BACKSTOP_SIZE := Vector3(16.0, 2.8, 0.5)
+
+## The turret, and the range it will engage at. Deliberately shorter than the
+## target's own 32 m: at the spawn point the player is 11 m away and already
+## inside that, so the shorter figure plus the cover wall at z = 16 is what keeps
+## a player who only wants to walk around from being shot at.
+const TURRET_POSITION := Vector3(0.0, 0.0, 13.0)
+const TURRET_ENGAGEMENT_RANGE := 13.0
+
+## Combat geometry gets its own colour again, so "this is here to shoot at" is
+## obvious from across the room.
+const RANGE_COLOUR := Color(0.62, 0.55, 0.42)
+
+const TARGET_SCENE := preload("res://scenes/game/practice_target.tscn")
+const TURRET_SCENE := preload("res://scenes/game/practice_turret.tscn")
+
 
 func _ready() -> void:
 	_build_cover()
 	_build_ramp()
 	_build_steps()
 	_build_overhang()
+	_build_range()
 
 
 ## Builds one [StaticBody3D] per entry in [constant COVER_BLOCKS]. A
@@ -152,6 +208,52 @@ func _build_overhang() -> void:
 	var size := Vector3(6.0, OVERHANG_THICKNESS, 6.0)
 	var body := _add_box("Overhang", size, _make_material(TEST_COLOUR))
 	body.position = OVERHANG_CENTRE + Vector3(0.0, OVERHANG_CLEARANCE + size.y * 0.5, 0.0)
+
+
+## Builds the Chapter 3 combat range: three practice targets, a backstop, and
+## the hostile turret.
+##
+## Instanced scenes rather than generated geometry, because unlike the cover
+## blocks these are real classes with behaviour - a target that could be built
+## out of a box and a shape would be a target that cannot report its own health.
+func _build_range() -> void:
+	# Turned to face the spawn. Every target is turned, not just the headshot
+	# one, so that adding a spot with an asymmetric prop later does not
+	# accidentally introduce a backwards target.
+	for i in TARGET_SPOTS.size():
+		var spot: Array = TARGET_SPOTS[i]
+		var at: Vector3 = spot[0]
+		var target := TARGET_SCENE.instantiate() as PracticeTarget
+		target.name = "Target%d" % (i + 1)
+		target.position = at
+		# A target with no head collider is a fairer body-shot test: every round
+		# that reaches it is a body round, so a headshot multiplier applied by
+		# mistake would show up immediately as the wrong number.
+		target.has_head_collider = bool(spot[1])
+		add_child(target)
+
+	var backstop := _add_box("Backstop", BACKSTOP_SIZE, _make_material(RANGE_COLOUR))
+	backstop.position = BACKSTOP_CENTRE + Vector3(0.0, BACKSTOP_SIZE.y * 0.5, 0.0)
+
+	var turret := TURRET_SCENE.instantiate() as PracticeTurret
+	turret.name = "Turret"
+	turret.position = TURRET_POSITION
+	turret.engagement_range = TURRET_ENGAGEMENT_RANGE
+	add_child(turret)
+
+
+## Resets every target and re-arms the turret. The test harness calls this
+## between scenarios so one test cannot leave the next one shooting a corpse.
+func reset_range() -> void:
+	for node in get_tree().get_nodes_in_group(&"practice_targets"):
+		var target := node as PracticeTarget
+		if target != null:
+			target.reset()
+	for node in get_tree().get_nodes_in_group(&"practice_turrets"):
+		var turret := node as PracticeTurret
+		if turret != null:
+			turret.enabled = true
+			turret.start_delay = 3.0
 
 
 func _make_material(colour: Color) -> StandardMaterial3D:
