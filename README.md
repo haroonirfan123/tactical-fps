@@ -40,6 +40,7 @@ res://
 ├── scenes/                # .tscn files, mirrored from scripts/
 │   ├── core/              # Boot, main menu, settings, loading screen
 │   ├── game/              # Match scene, round flow, spawn logic
+│   │                      #   + placeholder_environment.tscn (temporary)
 │   ├── player/            # Player, camera, weapon holder
 │   ├── weapons/           # Weapon scenes
 │   └── ui/                # HUD, scoreboard, menus
@@ -143,6 +144,11 @@ From the lobby, the dev harness appears. It shows the current phase and offers
 a button for every legal next phase, so you can walk the whole match flow by
 hand without waiting on timers.
 
+Behind the harness is a grey-box arena — a walled floor, a large apron of
+surrounding ground, some cover, a sky and a fixed overview camera. It exists
+purely to prove the project renders, lights and simulates. There is no player
+in it; nothing moves. Chapter 7 replaces it with the real map.
+
 ---
 
 ## Architecture
@@ -210,7 +216,7 @@ they do not each need a reference to whatever raised the event. If exactly one
 system cares, that system should just call the other one directly. `EventBus`
 is not a dumping ground — if you add a signal nobody listens to, delete it.
 
-### A note on the dev harness
+### A note on the dev harness and the grey box
 
 `scenes/core/main.tscn` is the permanent root: screens are swapped in and out
 as its children, never by replacing it. Routing has to outlive whatever it
@@ -220,6 +226,28 @@ next phase change.
 Its panel is a development harness, not a menu. It exists so the state machine
 can be driven before there is a player or a HUD. Chapter 8 replaces it; nothing
 should come to depend on it.
+
+`scenes/game/placeholder_environment.tscn` is the grey box behind it, and is
+equally disposable — Chapter 7 replaces it. It is a separate scene rather than
+part of `main.tscn` so that replacing the map is deleting one file, not
+unpicking nodes out of the router.
+
+Within that scene the split is deliberate:
+
+- **Authored in the `.tscn`** — sky, sun, camera, floor, walls. These are things
+  you want to click and adjust in the Inspector.
+- **Generated in the script** — the eight cover blocks. They are near-identical,
+  and a loop is a better home for them than a dozen copy-pasted nodes that all
+  have to be deleted again in Chapter 7.
+
+Two things are easy to get wrong in a placeholder and are worth doing properly
+now rather than rediscovering in Chapter 3:
+
+- **Every visible box has a matching `CollisionShape3D` sized separately from
+  its `BoxMesh`.** Editing the mesh to look right should never silently change
+  what a player can walk into.
+- **Both spawn points already exist as `Marker3D`s** (`AlphaSpawn`, `BravoSpawn`),
+  so Chapter 4 can assign teams without this scene having to change.
 
 ---
 

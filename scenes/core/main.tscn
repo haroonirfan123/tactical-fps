@@ -1,6 +1,7 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scripts/core/main.gd" id="1_main"]
+[ext_resource type="PackedScene" path="res://scenes/game/placeholder_environment.tscn" id="2_placeholder"]
 
 [node name="Main" type="Node"]
 script = ExtResource("1_main")
@@ -8,16 +9,32 @@ script = ExtResource("1_main")
 [node name="ScreenHost" type="Node" parent="."]
 unique_name_in_owner = true
 
+[node name="PlaceholderEnvironment" parent="." instance=ExtResource("2_placeholder")]
+unique_name_in_owner = true
+visible = false
+
 [node name="UI" type="CanvasLayer" parent="."]
 
 [node name="DevPanel" type="Control" parent="UI"]
 unique_name_in_owner = true
 layout_mode = 3
+anchors_preset = 11
+anchor_left = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -440.0
+grow_horizontal = 0
+grow_vertical = 2
+
+[node name="Background" type="ColorRect" parent="UI/DevPanel"]
+layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
+mouse_filter = 2
+color = Color(0.05, 0.055, 0.07, 0.93)
 
 [node name="Margin" type="MarginContainer" parent="UI/DevPanel"]
 layout_mode = 1
@@ -42,7 +59,7 @@ horizontal_alignment = 1
 
 [node name="Subtitle" type="Label" parent="UI/DevPanel/Margin/Column"]
 layout_mode = 2
-text = "These buttons are a testing tool for the Chapter 2 state machine. They will be deleted in Chapter 8. A real match is driven by the rules below, not by clicking."
+text = "These buttons are a testing tool for the game state machine, not a menu. A real match is driven by the rules below, not by clicking. The grey box behind this panel is a placeholder arena with nothing in it yet."
 horizontal_alignment = 1
 autowrap_mode = 3
 

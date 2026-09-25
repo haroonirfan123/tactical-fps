@@ -13,10 +13,11 @@ extends Node
 ## and go as children of this node, which stays put.
 ##
 ## The panel below is a development harness, not a menu. It exists so the state
-## machine can be driven and checked in Chapter 2, before there is a player, a
-## weapon or a HUD to show. It is hidden whenever a real screen is registered
-## for the phase. Chapter 8 replaces the harness; nothing else should ever
-## come to depend on it.
+## machine can be driven and checked before there is a player, a weapon or a
+## HUD to show. It is hidden whenever a real screen is registered for the phase.
+## The grey-box arena behind it is a placeholder so the project can be seen
+## rendering at all; Chapter 7 replaces the arena and Chapter 8 replaces the
+## harness. Nothing should ever come to depend on either one.
 
 ## Phase -> screen scene. Phases with no entry fall through to the dev harness,
 ## which is correct for every phase until Chapter 8.
@@ -36,6 +37,7 @@ const PHASE_NOTES := {
 }
 
 @onready var _dev_panel: Control = %DevPanel
+@onready var _environment: Node3D = %PlaceholderEnvironment
 @onready var _phase_label: Label = %PhaseLabel
 @onready var _note_label: Label = %NoteLabel
 @onready var _score_label: Label = %ScoreLabel
@@ -89,7 +91,13 @@ func _swap_screen(phase: int) -> void:
 		_current_screen = SCREENS[phase].instantiate()
 		_screen_host.add_child(_current_screen)
 
-	_dev_panel.visible = _current_screen == null
+	# A real screen means a real phase is fully handled, so the placeholder
+	# arena and its harness panel both stand down. They come back together for
+	# every other phase, which is the correct fallback until each one has a
+	# scene of its own.
+	var showing_harness: bool = _current_screen == null
+	_dev_panel.visible = showing_harness
+	_environment.visible = showing_harness
 
 
 # --- Dev harness --------------------------------------------------------
