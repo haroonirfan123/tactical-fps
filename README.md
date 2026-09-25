@@ -35,6 +35,7 @@ res://
 ├── icon.svg               # Window icon
 │
 ├── data/                  # Designer-editable .tres data (see below)
+│   └── weapons/           # Weapon stat tables
 │
 ├── scenes/                # .tscn files, mirrored from scripts/
 │   ├── core/              # Boot, main menu, settings, loading screen
@@ -97,6 +98,34 @@ scripts/player/player_controller.gd   <->   scenes/player/player_controller.tscn
 **`data/` vs `assets/`.** `data/` holds small, hand-editable `.tres` resource
 files that designers tweak — weapon stat tables, ability definitions, map
 metadata. Anything large or binary belongs in `assets/`.
+
+### The data types
+
+Four data classes, split by *when they change* rather than by what they hold.
+That distinction is the whole design:
+
+| Class | Base | Changes at runtime? | Holds |
+| --- | --- | --- | --- |
+| `WeaponData` | `Resource` | No — authored, saved as `.tres` | Damage, fire rate, magazine, price |
+| `PlayerState` | `RefCounted` | Yes | Health, team, alive, K/D/A |
+| `MatchState` | `RefCounted` | Yes | Round number, scores, winner |
+| `Team` | `RefCounted` | No | The `Side` enum and helpers |
+
+`WeaponData` is a `Resource` because its values are authored in the Inspector
+and saved to disk, and one instance is shared by every player using that
+weapon. The other three are `RefCounted` because they are live state that
+changes as the game runs, and each needs its own instance.
+
+**`load()` is cached — weapon stats are shared, not copied.** Every player
+holding the same weapon gets the *same* `WeaponData` object. Writing
+`weapon.damage = 50` at runtime would buff everyone using it. Per-player state
+that genuinely changes (rounds left, trigger held, recoil) belongs in a
+separate runtime object in Chapter 3, not on `WeaponData`.
+
+```gdscript
+var halberd := load("res://data/weapons/halberd.tres") as WeaponData
+print(halberd.display_name, " ", halberd.damage_at_distance(distance))
+```
 
 **Extending built-in types.** Avoid `extends CharacterBody3D` scattered across
 files. Write one base class per area (e.g. `scripts/player/player_body.gd`) and
@@ -222,8 +251,13 @@ Deliberately left out, so later chapters do not have to unpick them:
 - **No combat.** `ROUND_ACTIVE` owns the round clock and is the only place a
   round can end; nothing decides who won yet.
 - **Plain default-controls UI.** Presentation is Chapter 8's job.
-- **`data/` is still empty.** Weapon stats and ability values are the first
-  things that belong there, and both arrive in Chapters 3 and 6.
+- **No runtime weapon object.** `WeaponData` holds a weapon's stats and nothing
+  else. Firing, recoil, reload progress and ammo in the magazine are Chapter
+  3's job, and they live in a separate per-player object — not on `WeaponData`,
+  which is shared and must stay read-only.
+- **Three weapons, no roster.** `data/weapons/` holds a sidearm, an SMG and a
+  rifle as working examples of the `WeaponData` format. The real weapon list
+  and the buy menu that selects from it are Chapter 5's job.
 
 ### Originality note
 
