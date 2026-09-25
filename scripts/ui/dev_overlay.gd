@@ -19,7 +19,7 @@ extends CanvasLayer
 ## One line explaining what each phase is for, shown under the phase name.
 const PHASE_NOTES := {
 	GamePhase.Phase.MAIN_MENU: "Nobody connected, nothing loaded. This is the only phase you start in.",
-	GamePhase.Phase.LOBBY: "A fresh match. Peers show up here; the host starts the warm-up.",
+	GamePhase.Phase.LOBBY: "A fresh match. Peers show up here; the host starts the warm-up. Chapter 2 shows the playable playtest in this phase.",
 	GamePhase.Phase.WARMUP: "One-off countdown before the very first round. Only runs once per match.",
 	GamePhase.Phase.ROUND_START: "Freeze / buy window. The round counter ticks up here, not when combat starts.",
 	GamePhase.Phase.ROUND_ACTIVE: "Live round. Weapons and damage arrive in Chapter 3.",
@@ -38,10 +38,17 @@ var screen_host: Node = null
 @onready var _net_label: Label = %NetLabel
 @onready var _rules_label: Label = %RulesLabel
 @onready var _score_label: Label = %ScoreLabel
+@onready var _player_label: Label = %PlayerLabel
+@onready var _fps_label: Label = %FpsLabel
 @onready var _transition_box: HBoxContainer = %TransitionBox
 
 ## Buttons built for the current phase, so they can be cleared each refresh.
 var _transition_buttons: Array[Button] = []
+
+## Cached from the tree each refresh. Looked up by group rather than by asking
+## the playtest for it, so the overlay keeps working for a player that some
+## future scene spawned somewhere else entirely.
+var _player: Player = null
 
 
 func _ready() -> void:
@@ -52,6 +59,33 @@ func _ready() -> void:
 	# The game is already in a phase by the time this loads, so render once
 	# here instead of only reacting to future changes.
 	refresh(GameManager.current_phase)
+
+
+## The player readout and the frame counter change every frame; the phase,
+## rules and score do not. Keeping them on separate paths means the expensive
+## half - rebuilding the transition buttons - is not run 60 times a second.
+func _process(_delta: float) -> void:
+	_refresh_live()
+
+
+func _refresh_live() -> void:
+	_fps_label.text = "FPS %d   |   physics %d Hz   |   %d players" % [
+		Engine.get_frames_per_second(),
+		Engine.physics_ticks_per_second,
+		get_tree().get_nodes_in_group(&"players").size(),
+	]
+
+	_player = get_tree().get_first_node_in_group(&"players") as Player
+	if _player == null:
+		_player_label.text = "No player in the scene."
+		return
+
+	var position := _player.global_position
+	_player_label.text = "%s\nx %6.2f   y %6.2f   z %6.2f\n%s" % [
+		Player.state_name(_player.get_movement_state()),
+		position.x, position.y, position.z,
+		_player.debug_line(),
+	]
 
 
 ## Re-reads everything from the autoloads. Split from [method _on_state_changed]
