@@ -387,7 +387,7 @@ const VIEWMODEL_KICK_RECOVERY := 12.0
 @onready var _weapon_mount: Node3D = $Head/WeaponMount
 @onready var _hit_marker: HitMarker = $HitMarkerLayer/HitMarker
 @onready var _transform_sync: MultiplayerSynchronizer = $TransformSync
-
+@onready var _echo_field: EchoField = $EchoField
 
 ## Optional translucent capsule used only to make the collider visible while
 ## developing, and permanently visible for a body this machine is not driving.
@@ -758,6 +758,9 @@ func _on_weapon_fired() -> void:
 	# the truth about where the round goes.
 	var origin := get_eye_position()
 	var direction := get_look_direction()
+
+	# Report shooting activity to nearby Echo Fields (server will validate)
+	_report_shooting_to_echo_fields()
 
 	# Offline, this player is the whole authority and the raycast runs right
 	# here. Online, the host is the authority for what a shot hit, so the ray
@@ -1433,6 +1436,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 
+	# Echo Field deployment (Chapter 6)
+	if event.is_action_pressed(&"echo_field") and state.is_alive:
+		_try_deploy_echo_field()
+		get_viewport().set_input_as_handled()
+		return
+
 	# Looking around only makes sense with the mouse captured. Checking here
 	# rather than trusting the mouse mode means an alt-tab back into the
 	# window does not immediately start spinning the camera.
@@ -1880,3 +1889,37 @@ func debug_line_combat() -> String:
 		_recoil_yaw,
 		_death_tilt,
 	]
+
+
+# --- Echo Field (Chapter 6) -------------------------------------------------
+
+## Attempts to deploy the Echo Field at the player's feet.
+## Called from _unhandled_input when the echo_field action is pressed.
+func _try_deploy_echo_field() -> void:
+	if _echo_field == null:
+		push_warning("Player: echo_field not assigned.")
+		return
+	
+	if _echo_field.is_on_cooldown() or _echo_field.is_active:
+		return
+	
+	# Deploy at player's position, slightly forward
+	var deploy_pos := global_position + -_camera.global_transform.basis.z * 1.5
+	deploy_pos.y = global_position.y
+	
+	_echo_field.request_deploy(deploy_pos)
+
+
+## Reports shooting activity to nearby Echo Fields.
+## Called when the player fires a shot.
+func _report_shooting_to_echo_fields() -> void:
+	if not NetworkManager.is_online:
+		return
+	
+	for node in get_tree().get_nodes_in_group("echo_fields"):
+		var field: EchoField = node as EchoField
+		if field != null and field.is_active:
+			var dist := global_position.distance_to(field.global_position)
+			if dist <= field.detection_radius:
+				field.report_activity(EchoField.ECHO_SHOOTING, global_position, state.team)
+				break
