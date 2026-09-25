@@ -37,13 +37,14 @@ theme_override_constants/separation = 8
 
 [node name="Title" type="Label" parent="UI/DevPanel/Margin/Column"]
 layout_mode = 2
-text = "3v3 Tactical FPS"
+text = "DEVELOPMENT HARNESS - NOT THE GAME"
 horizontal_alignment = 1
 
 [node name="Subtitle" type="Label" parent="UI/DevPanel/Margin/Column"]
 layout_mode = 2
-text = "Chapter 2 - state machine harness"
+text = "These buttons are a testing tool for the Chapter 2 state machine. They will be deleted in Chapter 8. A real match is driven by the rules below, not by clicking."
 horizontal_alignment = 1
+autowrap_mode = 3
 
 [node name="GapTop" type="Control" parent="UI/DevPanel/Margin/Column"]
 custom_minimum_size = Vector2(0, 20)
@@ -80,8 +81,9 @@ layout_mode = 2
 
 [node name="TransitionPrompt" type="Label" parent="UI/DevPanel/Margin/Column"]
 layout_mode = 2
-text = "Jump to phase:"
+text = "Force the game into a phase (these moves also happen automatically on a timer):"
 horizontal_alignment = 1
+autowrap_mode = 3
 
 [node name="TransitionCenter" type="CenterContainer" parent="UI/DevPanel/Margin/Column"]
 layout_mode = 2
