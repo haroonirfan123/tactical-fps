@@ -66,13 +66,14 @@ func _build_field() -> void:
 	mesh_instance.name = "FieldMesh"
 	
 	var cylinder_mesh := CylinderMesh.new()
-	cylinder_mesh.radius = detection_radius
+	cylinder_mesh.top_radius = detection_radius
+	cylinder_mesh.bottom_radius = detection_radius
 	cylinder_mesh.height = 0.2
 	mesh_instance.mesh = cylinder_mesh
 	
 	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.2, 0.8, 1.0)
-	material.transparency = 1
+	material.albedo_color = Color(0.2, 0.8, 1.0, 0.3)
+	material.transparency = 0
 	material.render_priority = 1
 	material.cull_mode = StandardMaterial3D.CULL_BACK
 	mesh_instance.material_override = material
@@ -141,9 +142,14 @@ func _process(delta: float) -> void:
 
 
 ## Called by a player to deploy the Echo Field.
-## Validates on server, then activates.
+## Validates on server, then activates. In offline mode, runs locally.
 @rpc("any_peer", "call_remote", "reliable")
 func request_deploy(position: Vector3) -> void:
+	# In offline mode, execute locally instead of via RPC
+	if not NetworkManager.is_online:
+		_request_deploy_local(position)
+		return
+	
 	if not multiplayer.is_server():
 		return
 	
@@ -170,6 +176,31 @@ func request_deploy(position: Vector3) -> void:
 	position = result.position
 	
 	_activate(position, sender, player.state.team)
+
+
+## Local deployment for offline mode.
+func _request_deploy_local(position: Vector3) -> void:
+	var player = NetworkManager.get_local_player()
+	if player == null or not player.state.is_alive:
+		return
+	
+	if _cooldown_remaining > 0.0:
+		return
+	
+	if is_active:
+		return
+	
+	# Validate position is on navmesh/floor
+	var space_state = get_world_3d().direct_space_state
+	var query = PhysicsRayQueryParameters3D.create(position + Vector3(0, 2, 0), position - Vector3(0, 5, 0))
+	query.collision_mask = 1  # WORLD layer = 1 << 0 = 1
+	var result = space_state.intersect_ray(query)
+	if not result:
+		return
+	
+	position = result.position
+	
+	_activate(position, NetworkManager.SERVER_PEER_ID, player.state.team)
 
 
 func _activate(position: Vector3, peer_id: int, team: int) -> void:

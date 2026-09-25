@@ -234,6 +234,11 @@ func _on_peer_registered(peer_id: int, team_side: int, player_name: String) -> v
 ## mid-flight and has nothing to hand out otherwise. Everything that has to be
 ## known before the node enters the tree is written here, for that reason and no
 ## other.
+##
+## CRITICAL: We do NOT call configure_for_network here. The node must be added
+## to the scene tree first (by the MultiplayerSpawner) before we can call
+## set_multiplayer_authority on it. The pending_* fields are set here, and
+## Player._ready() will call configure_for_network after the node enters the tree.
 func _spawn_networked_player(data: Variant) -> Player:
 	var spawn_data := data as Dictionary
 	var body := PLAYER_SCENE.instantiate() as Player
@@ -253,6 +258,13 @@ func _spawn_networked_player(data: Variant) -> Player:
 	body.pending_peer_id = peer_id
 	body.pending_team = int(spawn_data.get("team", Team.Side.NONE))
 	body.pending_display_name = String(spawn_data.get("display_name", ""))
+
+	# Store spawn position and yaw as metadata so _on_player_spawned can read
+	# them back after the node enters the tree. MultiplayerSpawner.get_spawn_data()
+	# is only valid during the spawn function, not in the spawned signal handler.
+	body.set_meta("spawn_pos", spawn_data.get("spawn", FALLBACK_SPAWN))
+	body.set_meta("spawn_yaw", float(spawn_data.get("yaw", 0.0)))
+
 	return body
 
 
@@ -265,13 +277,22 @@ func _spawn_networked_player(data: Variant) -> Player:
 ## way in. What is left here is the part that can only happen once the node has
 ## a parent and a transform: putting it where the host decided, and noticing if
 ## it is the one this machine drives.
+##
+## [b]Note:[/b] We do NOT call `_spawner.get_spawn_data()` here because that
+## method is only valid during the spawn process (inside the spawn function).
+## The spawn data (position, yaw) was already passed via the spawn function and
+## stored on the body before it entered the tree. We read it back from the
+## body's properties instead.
 func _on_player_spawned(body: Node) -> void:
 	var networked := body as Player
 	if networked == null:
 		return
 
-	var data: Dictionary = _spawner.get_spawn_data()
-	networked.teleport_to(data.get("spawn", FALLBACK_SPAWN), float(data.get("yaw", 0.0)))
+	# The spawn position and yaw were stored on the body by _spawn_networked_player
+	# before it entered the tree. We read them from the body's metadata.
+	var spawn_pos: Vector3 = networked.get_meta("spawn_pos", FALLBACK_SPAWN)
+	var spawn_yaw: float = networked.get_meta("spawn_yaw", 0.0)
+	networked.teleport_to(spawn_pos, spawn_yaw)
 
 	# Matched on the body's own identity rather than on the spawn data, so this
 	# reads the same answer the rest of the node does. A body that disagrees with

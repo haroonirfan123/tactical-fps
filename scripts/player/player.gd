@@ -516,8 +516,10 @@ func configure_for_network(p_peer_id: int, team_side: int, player_name: String =
 	# does not apply - and answering it "wrongly" would hand the single local
 	# player a remote body, a dead camera and no input, which is a game that
 	# renders a room nobody can move in.
+	# Use NetworkManager.local_peer_id instead of multiplayer.get_unique_id()
+	# because this may be called before the node is in the scene tree.
 	is_network_remote = NetworkManager.is_online \
-		and p_peer_id != multiplayer.get_unique_id()
+		and p_peer_id != NetworkManager.local_peer_id
 
 	# The node's own authority follows the owning peer, which is what makes
 	# `is_multiplayer_authority()` - used all over the RPC layer - answer the
