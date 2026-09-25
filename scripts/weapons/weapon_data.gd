@@ -110,12 +110,59 @@ enum Category {
 ## a stat that is never meaningfully consulted. If the design later adds a
 ## limited-ammo mode, that is the moment to add it - and it belongs here
 ## rather than being tracked per player.
+##
+## This was re-confirmed when Chapter 3 was specified: reserve ammunition is
+## infinite for now. The [Weapon] runtime object still exposes a
+## [member Weapon.reserve_ammo] slot, so a finite-reserve mode can be switched
+## on later without reshaping the weapon API.
 
 # --- Economy ------------------------------------------------------------
 
 ## Cost in the buy menu, Chapter 5. Zero means it cannot be bought and is
 ## issued automatically.
 @export var price: int = 0
+
+# --- Recoil -------------------------------------------------------------
+# Added in Chapter 3. Chapter 1 authored the damage, ballistics and ammunition
+# numbers but had no field for recoil, because recoil is a firing behaviour
+# rather than a statistic - and at the time nothing fired. It belongs here for
+# the same reason [member damage] does: it is a per-weapon balance number a
+# designer sets in the Inspector, not something the firing code should invent.
+
+## How far one shot kicks the camera upwards, in degrees. Applied as a decaying
+## offset on top of the player's own aim rather than by rotating the player, so
+## the view always returns to where the player was actually looking. See
+## [method Player.add_recoil].
+@export_range(0.0, 10.0, 0.05) var recoil_kick_degrees: float = 0.7
+
+## Random sideways kick per shot, in degrees. Small, and deliberately random
+## rather than a fixed pattern: a learnable spray pattern is another game's
+## signature, and this game should not have one.
+@export_range(0.0, 5.0, 0.05) var recoil_yaw_degrees: float = 0.25
+
+## How quickly the camera returns to the player's true aim, in degrees per
+## second. Fast recovery keeps a burst from permanently walking the view off
+## target, which is the "uncontrollable recoil" the Chapter 3 brief rules out.
+@export_range(1.0, 180.0, 1.0) var recoil_recovery_degrees: float = 55.0
+
+## How far the viewmodel is pushed back along its own axis when fired, in
+## metres. Purely cosmetic - the muzzle flash and the tracer are what tell the
+## player a shot happened.
+@export_range(0.0, 0.3, 0.005) var viewmodel_kick: float = 0.045
+
+# --- Movement penalty ---------------------------------------------------
+# Also a Chapter 3 addition, and also per-weapon because the Chapter 3 brief
+# lists it as one of the things that should differ between weapons.
+
+## Multiplier applied to the player's movement speed while this weapon is
+## equipped. 1.0 is no penalty. Values below 1.0 make carrying a heavy weapon a
+## real cost without touching the player's own speed exports.
+@export_range(0.1, 1.0, 0.01) var move_speed_multiplier: float = 0.95
+
+## Whether holding this weapon prevents sprinting. A rifle that can be
+## sprint-fired and a rifle that cannot are very different weapons, and that
+## should be a decision in the data rather than an if-statement in the player.
+@export var blocks_sprint: bool = false
 
 
 ## Whether this weapon can be picked in a buy menu at all.
