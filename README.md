@@ -2,13 +2,16 @@
 
 An original 3v3 tactical first-person shooter built in Godot.
 
-> **Status: Chapter 2 complete.**
+> **Status: Chapter 3 complete.**
 > The project structure, phase state machine, data resources, boot scene and
 > debug overlay exist from Chapter 1. Chapter 2 adds a reusable first-person
 > `Player` with full movement, mouse look, crouch, jump, step-up and slope
-> handling, and the game boots straight into a test environment to exercise it.
-> There is no weapon, combat or HUD yet. See [Roadmap](#roadmap) for what comes
-> next.
+> handling. Chapter 3 adds a modular weapon system, one working full-auto rifle
+> (**Kestrel**), hitscan ballistics, a reusable damage interface, player health
+> and death, headshots, reloads, recoil, hit feedback, and a practice range with
+> targets, cover and a hostile turret. There is no networking of the player and
+> no real HUD yet — Chapter 4 and Chapter 8 respectively. See
+> [Roadmap](#roadmap) for what comes next.
 
 ---
 
@@ -50,29 +53,44 @@ res://
 ├── data/                  # Designer-editable .tres data (see below)
 │   ├── match_rules.tres   # Rounds, phase lengths, players per team
 │   └── weapons/           # Weapon stat tables
+│   │   └── kestrel.tres   # Ch. 3 — the one playable weapon
 │
 ├── scenes/                # .tscn files, mirrored from scripts/
 │   ├── core/              # Boot, main menu, settings, loading screen
+│   ├── fx/                # Ch. 3 — impact effect, local weapon feedback
+│   │   ├── impact_effect.tscn
+│   │   └── weapon_fx.tscn
 │   ├── game/              # Match scene, round flow, spawn logic
 │   │   ├── playtest.tscn  # Ch. 2 — boots into this
+│   │   ├── practice_target.tscn   # Ch. 3 — damageable, two colliders
+│   │   ├── practice_turret.tscn   # Ch. 3 — hostile, damages the player
 │   │   └── placeholder_environment.tscn (temporary)
 │   ├── player/            # Player, camera, weapon holder
-│   │   └── player.tscn    # Ch. 2 — the reusable first-person body
-│   ├── weapons/           # Weapon scenes
-│   └── ui/                # HUD, scoreboard, menus
-│                      #   + dev_overlay.tscn (temporary, see Debug overlay)
+│   │   └── player.tscn    # Ch. 2 body + Ch. 3 health, weapon, feedback
+│   ├── ui/                # HUD, scoreboard, menus
+│   │   ├── hit_marker.tscn   # Ch. 3 — crosshair hit confirmation
+│   └── weapons/           # Weapon scenes
+│       └── rifle.tscn     # Ch. 3 — placeholder viewmodel, no collision
 │
 ├── scripts/               # All .gd files
 │   ├── core/              # Cross-cutting: EventBus, GameConfig, boot screen
+│   │   └── collision_layers.gd  # Ch. 3 — one source of truth for layer bits
 │   ├── game/              # GameManager, GameState, MatchState, MatchRules
-│   │   │   └── states/    # One file per phase - see Architecture
-│   │   └── playtest.gd    # Ch. 2 — spawns the player into the test arena
+│   │   ├── states/        # One file per phase - see Architecture
+│   │   ├── playtest.gd    # Ch. 2 — spawns the player into the test arena
+│   │   ├── practice_target.gd   # Ch. 3
+│   │   └── practice_turret.gd   # Ch. 3
+│   ├── fx/                # Ch. 3 — impact effect, local-only weapon feedback
 │   ├── network/           # Multiplayer / netcode
 │   ├── player/            # Player controller, camera, movement
-│   │   └── player.gd      # Ch. 2 — the whole controller
+│   │   └── player.gd      # Ch. 2 controller + Ch. 3 health/weapon/recoil
 │   ├── ui/                # HUD and menu logic
-│   │   └── dev_overlay.gd # Debug readout (temporary)
+│   │   ├── dev_overlay.gd # Debug readout (temporary)
+│   │   └── hit_marker.gd  # Ch. 3
 │   └── weapons/           # Weapon behaviour, ballistics, damage
+│       ├── damageable.gd  # Ch. 3 — the reusable damage contract
+│       ├── weapon.gd      # Ch. 3 — the runtime weapon
+│       └── weapon_data.gd # Ch. 1 + Ch. 3 recoil / movement fields
 │
 └── assets/                # All non-code content
     ├── audio/             # SFX, music, ambience
@@ -147,8 +165,9 @@ session cap from `players_per_team`, so the two can never drift apart.
 **`load()` is cached — weapon stats are shared, not copied.** Every player
 holding the same weapon gets the *same* `WeaponData` object. Writing
 `weapon.damage = 50` at runtime would buff everyone using it. Per-player state
-that genuinely changes (rounds left, trigger held, recoil) belongs in a
-separate runtime object in Chapter 3, not on `WeaponData`.
+that genuinely changes (rounds left, trigger held, recoil) lives in a separate
+runtime object — `Weapon`, added in Chapter 3 — not on `WeaponData`. See
+[Weapons and combat](#weapons-and-combat).
 
 ```gdscript
 var halberd := load("res://data/weapons/halberd.tres") as WeaponData
@@ -160,11 +179,46 @@ files. Write one base class per area (e.g. `scripts/player/player_body.gd`) and
 extend that. It keeps shared behaviour in one place.
 
 `Player` currently extends `CharacterBody3D` directly, which is the one place
-this rule is bent: there is exactly one body type, so a base class would be a
-file containing nothing but a class declaration. If Chapter 3 adds a second kind
-of body — a turret, a vehicle, a death ragdoll — that is when
-`scripts/player/player_body.gd` starts earning its keep, and `Player` should be
-re-parented onto it then rather than before.
+this rule is bent: there is exactly one *player* body type, so a base class would
+be a file containing nothing but a class declaration. Chapter 3 did add a second
+kind of body — the `PracticeTurret` — and deliberately did **not** promote it to
+`player_body.gd`, because the turret is a `Node3D` that turns and shoots; it
+shares no movement, stance or camera code with the player at all. A base class
+containing nothing but two unrelated classes' worth of empty methods is not an
+abstraction. If Chapter 4 adds a second *player* (a remote body driven by
+snapshots) or Chapter 6 adds a vehicle, that is when the shared
+`CharacterBody3D` behaviour is finally worth factoring out.
+
+### Health and death (Chapter 3)
+
+`Player` gained health in Chapter 3, and the shape of it was chosen so Chapter 5
+can drop a respawn timer and a kill feed on top without rearranging anything:
+
+- **The numbers are on `PlayerState`, not the controller.** `MAX_HEALTH` and
+  `current_health` already existed from Chapter 1; `player.gd` reads and writes
+  them and owns the `PlayerState` instance. There is no second `health` field
+  on the body.
+- **`apply_damage(amount, source, zone)` is the one way in**, and it is reached
+  through `Damageable.deal_damage()` so the weapon, the turret and a future
+  network validator all take the same path.
+- **`died(source)` is emitted exactly once.** The sequence is guarded on a
+  separate `_is_dying` flag rather than on `state.is_alive`, because
+  `apply_damage` clears `is_alive` *before* calling `die()` — guarding on
+  `is_alive` means the death routine never runs at all. This exact mistake
+  already existed in `PlayerState.record_death()` in Chapter 1 and is worth
+  remembering.
+- **The corpse stays in the scene and moves to the `CORPSE` layer.** The
+  capsule is left at full standing height, so a dead body still blocks movement
+  and still gets shot; only the camera sinks.
+- **The camera fall is derived from a 0-to-1 timer**, not approached with a
+  lerp, so it provably reaches `death_camera_height` at any frame rate.
+- **`input_enabled` and alive are separate questions.** Death does not go
+  through `set_input_enabled(false)`. That flag means "the network owns this
+  transform" and Chapter 4 needs it to stay true for a corpse so it can tell a
+  dead remote player from a live one. Overloading it would also release the
+  mouse at the worst possible moment.
+- **`respawn()` is a real path**, already used by the test range's reset button:
+  health, stance, camera, weapon magazine and corpse layer all return to normal.
 
 ---
 
@@ -183,10 +237,15 @@ Chapter 1 main menu back.
 | `Ctrl` or `C`      | Crouch (hold)                                |
 | `Space`            | Jump                                         |
 | `Mouse`            | Look                                         |
+| `LMB` (hold)       | Fire — Kestrel is full-auto, so hold to keep firing |
+| `R`                | Reload                                       |
 | `Escape`           | Release the mouse (click the window to recapture) |
 
 Every binding is an action in the Input Map, not a raw keycode in the script,
-so all of them are remappable in one place.
+so all of them are remappable in one place. `fire` and `reload` were added in
+Chapter 3 and follow the same rule as the Chapter 2 movement actions: the
+controller asks `Input.is_action_pressed(&"fire")` and never asks what physical
+button the user happened to press.
 
 The test arena is the Chapter 1 grey box plus three things a movement controller
 has to be tested on and that a flat floor cannot catch: a **15° ramp**, a
@@ -196,16 +255,23 @@ into each to confirm the controller behaves; all three are generated by
 `placeholder_environment.gd` and are deleted along with the rest of the
 placeholder in Chapter 7.
 
+Chapter 3 adds a second generated area to the same scene, `_build_range()`: a
+backstop wall, **three practice targets** (one with a shootable head, one
+without, one plain body) and a **hostile turret** that fires at you. All of it
+is generated in script so it comes out in one deletion in Chapter 7. The debug
+overlay has a **Reset range** button that puts the targets and the turret back
+up without restarting the game.
+
 Once you leave the title screen, the **debug overlay** appears down the right
 side. It shows the current game state, which screen is routed in, the live
 match rules, the score, whether networking is active, the frame rate, the
-player's position and speed, and the player's movement state. It also offers a
-button for every legal next phase, so you can walk the whole match flow by hand
-without waiting on timers.
+player's position and speed, the player's movement state, and — since Chapter 3
+— health and ammo. It also offers a button for every legal next phase, so you
+can walk the whole match flow by hand without waiting on timers.
 
-**There is still no playable game here.** You can walk, look, crouch and jump,
-but there is no weapon, no combat, no HUD and no networking of the player — all
-of that starts in Chapter 3.
+**There is still no playable game here.** You can walk, look, crouch, jump, shoot
+and die, but there is no real HUD, no networked player and no round objective.
+Chapter 4, 5 and 8 are what turn this into a match.
 
 ---
 
@@ -215,12 +281,22 @@ of that starts in Chapter 3.
 it as many times as you like; nothing about it is unique or global.
 
 ```
-Player (CharacterBody3D)   collision_layer 2, collision_mask 1
+Player (CharacterBody3D)   collision_layer 2, collision_mask 13
 ├── Collision (CollisionShape3D)   capsule; height and Y follow the stance
 │   └── BodyMesh (MeshInstance3D)  hidden by default; visualises the collider
-└── Head (Node3D)                 Y = eye height
-    └── Camera3D                  fov 90, near 0.05
+├── WeaponFx (Node3D)      Ch. 3 — local-only impact + muzzle effects
+├── Head (Node3D)                 Y = eye height
+│   ├── Camera3D                  fov 90, near 0.05
+│   └── WeaponMount (Node3D)      Ch. 3 — viewmodel attaches here
+│       └── Rifle (Node3D)        Ch. 3 — no collider, cosmetic only
+└── HitMarkerLayer (CanvasLayer)  Ch. 3
+    └── HitMarker (Control)       drawn on a confirmed hit
 ```
+
+The mask is 13, not 1, because Chapter 3 added two layers: `TARGET` (4) so the
+player can be shot by practice targets, and `CORPSE` (8) so a dead body still
+blocks movement. All four layer bits live in `scripts/core/collision_layers.gd`
+so nothing hard-codes a magic number.
 
 **Yaw is on the body, pitch is on the head.** That split is deliberate: the
 body's basis stays yaw-only, so a player looking up at the sky cannot tilt
@@ -289,6 +365,179 @@ This is the part Chapter 4 should not have to redesign.
   respawn never inherits the momentum of whatever killed the player.
 
 Replication, authority and interpolation are all still Chapter 4's work.
+
+---
+
+## Weapons and combat
+
+### The shape of it
+
+Chapter 1 shipped `WeaponData` as a shared, read-only `Resource` of stats. That
+is still exactly what it is. Chapter 3 adds the runtime half as a **separate
+object**, because those two things change at completely different times:
+
+```
+data/weapons/kestrel.tres          scripts/weapons/weapon.gd
+┌────────────────────────┐        ┌──────────────────────────┐
+│ WeaponData (Resource)  │  ───▶  │ Weapon (Node3D)          │
+│  shared, never mutated │  load  │  per-player, per-round   │
+│  damage, fire rate,    │        │  ammo, cooldown, reload  │
+│  magazine, recoil ...  │        │  timer, trigger, flash   │
+└────────────────────────┘        └──────────────────────────┘
+                                       │
+                     Player ───────────┤ equips, owns, reads the trigger
+                                       ▼
+                              damage travels *outward*
+                    weapon.hitscan() ──▶ Damageable.deal_damage()
+                                            │
+                                            ▼
+                                    target.apply_damage()
+```
+
+Two players holding the Kestrel share one `WeaponData` and each have their own
+`Weapon`. A designer retunes falloff by editing the `.tres`; nobody can buff
+the whole lobby by writing `weapon.data.damage = 50` at runtime, because that
+object is shared and is only ever read.
+
+**The weapon owns its own rules.** Fire rate, magazine size, reload timing,
+empty-mag dry fire and burst pacing all live in `weapon.gd`. `GameManager` does
+not know a weapon exists, and neither does the Player — the Player polls the
+trigger, passes the aim ray in, and responds to a signal. Adding a second
+weapon means adding a `.tres`, not editing a `match` conditional.
+
+**The aim ray is passed in, never read from a camera.** `weapon.hitscan(origin,
+direction)` is public and separate from `try_fire()`. The weapon has no
+reference to a `Camera3D` and no way to find one. This is what lets Chapter 4
+validate a client-claimed shot on the host using the host's own ray rather than
+trusting whatever the client said it hit.
+
+**`update_trigger(held, just_pressed, delta)` takes the trigger as arguments**
+for the same reason. The Player owns the input switch, so a remote player with
+`input_enabled == false` holds a weapon that cannot fire, and `weapon.gd` never
+has to contain the word "input".
+
+### The damage contract
+
+`scripts/weapons/damageable.gd` is a `RefCounted` helper with a `HitZone`
+enum and static functions. It is **duck-typed, not a base class**, and that is
+deliberate: `Player` already extends `CharacterBody3D` and GDScript has no
+multiple inheritance, so a `Damageable` base class would force a rewrite of
+working Chapter 2 movement code to gain nothing.
+
+```gdscript
+# What a target must provide:
+func apply_damage(amount: float, source: Node3D, zone: HitZone) -> void
+func get_health() -> int
+func get_max_health() -> int
+func is_dead() -> bool
+func resolve_hit_zone(point: Vector3, collider: Object) -> HitZone
+```
+
+Anything with those five methods is damageable. `Player`, `PracticeTarget` and
+Chapter 4's network validator will all answer them.
+
+`find_target(collider)` walks **up** the parent chain, which is what lets a head
+hitbox be a plain scriptless `StaticBody3D` child: the ray hits the collider,
+the helper climbs to the entity that can actually take the damage, and only then
+is the entity asked which zone was struck. The weapon never writes to a
+target's fields.
+
+**Hit zones are resolved by the target, not the weapon.** A target knows whether
+its own colliders are a head or a torso; the weapon only knows where the round
+landed. Two different implementations, both satisfying the contract:
+
+- `Player` uses a **height band** — `head_hit_fraction` of
+  `get_current_height()`, so the head zone moves down when the player crouches
+  and cannot desync from the resizing capsule. A second collider would have to
+  be animated in lockstep with every stance change and would drift.
+- `PracticeTarget` uses a **genuinely separate head collider**, because a
+  stationary dummy is the one case where two static bodies are simpler and more
+  honest than a height calculation.
+
+### Kestrel
+
+`data/weapons/kestrel.tres` is the one working weapon. It is correctly
+categorised as a `RIFLE` and set to `AUTO`.
+
+| Field                       | Value  | Notes                                        |
+| --------------------------- | ------ | -------------------------------------------- |
+| `damage`                    | 26.0   | Base, before falloff and headshot            |
+| `headshot_multiplier`       | 2.2    | Configurable, not hard-coded                 |
+| `max_range`                 | 45.0   | Beyond this the ray stops                    |
+| `min_damage_floor`          | 0.75   | Fraction of damage at maximum range          |
+| `fire_interval`             | 0.09   | ~667 RPM                                     |
+| `magazine_size`             | 30     |                                              |
+| `reload_time`               | 2.1 s  |                                              |
+| `recoil_pitch`              | 0.8°   | Per shot, recovers over time                 |
+| `recoil_yaw`                | 0.3°   | Randomised sign                              |
+| `recoil_recovery_degrees`   | 9.0    | °/s back to zero                             |
+| `movement_multiplier`       | 0.92   | While held up                                |
+| `spread_degrees`            | small  | Random cone, not a memorisable pattern       |
+
+**Reserve ammunition is infinite in Chapter 3** — `weapon.infinite_reserve` is
+`true`. But `reserve_ammo` is still a real field, and the finite path in
+`_finish_reload()` is the same code with the subtraction written out, so
+Chapter 5's round-based buy system is a data change rather than a rewrite.
+**There is no buy system in this chapter**, and `price` on `WeaponData` is
+still unused.
+
+### Recoil cannot steal your aim
+
+This is the one piece of the player controller Chapter 3 had to be careful
+about, because "recoil" and "the player rotated" are very easy to conflate.
+
+- `_look_pitch` is the **authoritative** player-controlled pitch. Nothing else
+  writes to it.
+- `head.rotation.x` is **derived output**, recomputed every frame in
+  `_apply_view()` as `clamp(_look_pitch - _recoil_pitch, ...)`.
+- The weapon emits `recoil_requested`; the **player** applies and recovers it.
+
+So recoil is a decaying offset layered on top of the real aim, and when it
+recovers to zero the crosshair is exactly where the mouse last put it. A recoil
+system that adds directly to `head.rotation.x` leaves the player's actual aim
+permanently altered after a single burst, which is a bug that feels like
+"sticky aim" and is very hard to diagnose later.
+
+### Feedback is a request, not a decision
+
+The weapon emits `impact_requested(point, normal, zone)` and
+`hit_confirmed(killed, zone, health_left)`. `WeaponFx` — a node under the
+Player — decides what that means locally: spawn an `ImpactEffect`, flash the
+muzzle, draw a `HitMarker`.
+
+The split is the Chapter 4 boundary. In multiplayer the host decides what was
+actually hit; a client should not be drawing a blood decal because its own
+raycast guessed. Keeping the signal on one side and the drawing on the other
+means the visual layer can be deleted or replaced without touching ballistics.
+
+### Collision layers
+
+One source of truth, `scripts/core/collision_layers.gd`:
+
+| Constant        | Bit | Used by                                    |
+| --------------- | --- | ------------------------------------------ |
+| `WORLD`         | 1   | Floor, walls, cover, backstop              |
+| `PLAYER`        | 2   | Live player bodies                         |
+| `TARGET`        | 4   | Practice targets                           |
+| `CORPSE`        | 8   | Dead player bodies                         |
+
+`PLAYER_BODY_MASK = 13` and `WEAPON_MASK = 15` are derived from those bits.
+The weapon mask is everything, so a round stops on a wall, a live player, a
+target or a corpse without the weapon knowing which is which.
+
+### The practice range
+
+Generated by `placeholder_environment.gd`, so Chapter 7 deletes it in one
+stroke:
+
+- **A backstop wall** to stop rounds and prove that cover blocks hitscan.
+- **Three `PracticeTarget`s** — one with a shootable head collider, one
+  headless (to test zone fallback), one plain body. Each records `last_zone`,
+  topples when it dies, and is resettable.
+- **A `PracticeTurret`** that periodically turns toward the player, checks line
+  of sight, and damages them through the *same* `Damageable` path the player's
+  weapon uses. No AI, no pathfinding — it exists so the combat loop is provably
+  bidirectional.
 
 ---
 
@@ -368,7 +617,8 @@ next phase change.
 title screen. It reports the current game state, the scene currently routed
 to, whether networking is active, the live match rules, the score, the frame
 rate and the player's position and movement state, plus buttons that force the
-state machine into any legal phase.
+state machine into any legal phase. Chapter 3 added the player's health and
+weapon readout and a **Reset range** button.
 
 **It is disposable, and deliberately isolated so that removing it is trivial.**
 Either set `Main.DEV_OVERLAY_ENABLED` to `false`, or delete the two
@@ -392,8 +642,9 @@ Within that scene the split is deliberate:
 
 - **Authored in the `.tscn`** — sky, sun, camera, apron, floor, walls. These are
   things you want to click and adjust in the Inspector.
-- **Generated in the script** — the eight cover blocks, plus the Chapter 2 ramp,
-  staircase and overhang. They are near-identical, and a loop is a better home
+- **Generated in the script** — the eight cover blocks, the Chapter 2 ramp,
+  staircase and overhang, and the Chapter 3 practice range (backstop, three
+  targets, a turret). They are near-identical, and a loop is a better home
   for them than a dozen copy-pasted nodes that all have to be deleted again in
   Chapter 7.
 
@@ -402,7 +653,8 @@ now rather than rediscovering in Chapter 3:
 
 - **Every visible box has a matching `CollisionShape3D` sized separately from
   its `BoxMesh`.** Editing the mesh to look right should never silently change
-  what a player can walk into.
+  what a player can walk into. Chapter 3 held to this for the backstop and the
+  targets it generated.
 - **Both spawn points already exist as `Marker3D`s** (`AlphaSpawn`, `BravoSpawn`),
   so Chapter 4 can assign teams without this scene having to change.
 
@@ -421,7 +673,7 @@ Each chapter builds on the last.
       scene, debug overlay
 - [x] **Ch. 2 — FPS Player Controller:** input map, movement, camera, jumping,
       sprinting, crouching
-- [ ] **Ch. 3 — Weapons & Combat:** guns, shooting, damage, health, headshots,
+- [x] **Ch. 3 — Weapons & Combat:** guns, shooting, damage, health, headshots,
       reloads
 - [ ] **Ch. 4 — 3v3 Multiplayer:** networking, players, synchronization, teams
 - [ ] **Ch. 5 — Tactical Round System:** rounds, objectives, timers, victory
@@ -459,22 +711,58 @@ Deliberately left out, so later chapters do not have to unpick them:
 
 ### Carried forward from Chapter 2
 
+Now done, and listed here so the reasoning survives:
+
+- ~~**No weapon holder, viewmodel or camera shake.**~~ Chapter 3 added
+  `WeaponMount` under `Head` and `rifle.tscn` beneath it, so the viewmodel
+  follows the camera with no parenting code. It carries **no collider at all**,
+  which is the only reliable way to stop a first-person weapon clipping into
+  geometry.
+- ~~**No health, damage or death.**~~ `PlayerState`'s health and alive/dead
+  flags are now written, `PlayerState.record_death()` is called exactly once,
+  and the corpse is retained on the `CORPSE` layer. See
+  [Health and death](#health-and-death-chapter-3).
+- ~~**No replication or interpolation.**~~ Still true and still Chapter 4's
+  work — but the seams it needs now exist: `input_enabled`, a `Damageable`
+  contract the host can validate against, a damage result the weapon reports as
+  a signal rather than a local side effect, and an aim ray passed *into* the
+  weapon rather than read out of a camera.
+- ~~**No respawn path.**~~ `respawn()` exists and is used by the range's reset
+  button. Chapter 4 owns *when* a respawn happens.
+- ~~**No collider with the world.**~~ The player capsule is mask 13. It still
+  passes through other players — Chapter 4 decides whether that should change,
+  because it is a bandwidth and gameplay question, not a chapter-3 one.
+
+### Carried forward from Chapter 3
+
 Also deliberately left out:
 
-- **No weapon holder, viewmodel or camera shake.** The player has no
-  `WeaponMount` child yet. Chapter 3 adds it, and it should attach under `Head`
-  so the weapon follows the camera automatically.
-- **No health, damage or death.** The controller has no concept of being hit.
-  `PlayerState` exists and is owned by the player, ready for health and alive /
-  dead flags, but nothing writes to it yet. The `MovementState.DEAD` enum value
-  exists for the same reason.
-- **No replication or interpolation.** The `input_enabled` seam is the hook, but
-  no snapshots are sent and no remote player is smoothed. Chapter 4's work.
-- **No respawn path.** `teleport_to()` exists and is tested, but nothing calls
-  it except the tests. Chapter 4 owns when a respawn happens.
-- **No collider with the world.** The player capsule is a plain `CapsuleShape3D`
-  and only collides with layer 1. It passes through other players. Chapter 4
-  decides the player-collision layer and whether players block each other.
+- **No projectiles.** The ballistics are a hitscan `PhysicsDirectSpaceState3D`
+  raycast, deliberately isolated in one public `hitscan(origin, direction)`
+  method so a projectile path can replace it without touching ammo, fire rate,
+  reload, damage or the player. The aim ray is already an argument, which is
+  the hard part of that swap.
+- **No networked combat.** The host does not validate shots, health is local,
+  and nothing is replicated. Chapter 4's job. The weapon was built with the
+  seam in mind: a signal for what was hit, a passed-in ray, and no local
+  visual side effects in the ballistics code.
+- **No real HUD.** The debug overlay grew an ammo and health readout, which is
+  a debug readout and not a HUD. Hit markers are a `CanvasLayer` drawing
+  primitives. Chapter 8 replaces all of it.
+- **No audio.** The muzzle flash, impact effect and hit marker are all
+  placeholder visuals; the signal seam is there for sounds in Chapter 9.
+- **No weapon select, no inventory, no buy phase.** The Player equips one
+  weapon at construction. Chapter 5.
+- **Infinite reserve only.** `reserve_ammo` exists and the finite path is
+  implemented and tested, but `infinite_reserve` is on. Chapter 5's buy
+  system turns it off.
+- **One weapon.** `data/weapons/` still holds the Chapter 1 sidearm, SMG and
+  rifle stat tables as examples of the `WeaponData` format, but only the
+  Kestrel has a runtime `Weapon` scene behind it. The real roster and the
+  selection UI are Chapters 5 and 8.
+- **No animations.** Firing, reloading and the death camera fall are all
+  procedural transforms. Chapter 9 replaces them, and `WeaponFx` and
+  `WeaponMount` are the seams for that.
 - **The game boots into the playtest, not the menu.** `Main.BOOT_INTO_PLAYTEST`
   is `true`. Flip it to `false` once there is a menu worth landing on.
 
