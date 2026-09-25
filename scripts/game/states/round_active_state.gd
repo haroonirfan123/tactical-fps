@@ -13,23 +13,13 @@ extends GameState
 ## Emitted every frame with the seconds left in the round.
 signal round_time_updated(remaining: float)
 
-## Length of a round in seconds.
-var duration: float = 90.0
-
-var _remaining: float = 0.0
-
 
 func enter(_previous: GameState) -> void:
-	_remaining = duration
-
-
-func exit(_next_state: GameState) -> void:
-	_remaining = 0.0
+	_start_countdown(get_rules().round_seconds)
 
 
 func update(delta: float) -> void:
-	_remaining -= delta
-	round_time_updated.emit(maxf(_remaining, 0.0))
+	round_time_updated.emit(_tick_countdown(delta))
 	if _remaining <= 0.0:
 		# Time ran out. Passing NONE means "no team won this round", which is
 		# different from a draw between two teams and must not be scored.

@@ -40,9 +40,17 @@ var current_phase: int = GamePhase.Phase.MAIN_MENU
 ## The state object for [member current_phase]. Never null after startup.
 var current_state: GameState = null
 
+## The tunable rules for the match, loaded from
+## [code]res://data/match_rules.tres[/code]. See [MatchRules] for why these are
+## data rather than constants.
+##
+## Declared before [member match_state] on purpose: GDScript runs member
+## initialisers top to bottom, and the match is built from these rules.
+var match_rules: MatchRules = MatchRules.load_default()
+
 ## Score, round number and match winner. There is exactly one match at a time,
 ## which is why this is owned here rather than being an autoload of its own.
-var match_state: MatchState = MatchState.new()
+var match_state: MatchState = MatchState.new(match_rules)
 
 ## Phase -> the script that implements it. This is where a new phase gets
 ## registered; see [GameState] for the full checklist.

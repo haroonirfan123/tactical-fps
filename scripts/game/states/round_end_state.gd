@@ -9,14 +9,9 @@ extends GameState
 ## Emitted every frame with the seconds left before the next phase.
 signal resolution_updated(remaining: float)
 
-## Seconds the result stays on screen.
-var duration: float = 5.0
-
-var _remaining: float = 0.0
-
 
 func enter(_previous: GameState) -> void:
-	_remaining = duration
+	_start_countdown(get_rules().round_end_seconds)
 
 	var match_data := get_match()
 	var winner := match_data.last_round_winner
@@ -29,13 +24,8 @@ func enter(_previous: GameState) -> void:
 	resolution_updated.emit(_remaining)
 
 
-func exit(_next_state: GameState) -> void:
-	_remaining = 0.0
-
-
 func update(delta: float) -> void:
-	_remaining -= delta
-	resolution_updated.emit(maxf(_remaining, 0.0))
+	resolution_updated.emit(_tick_countdown(delta))
 	if _remaining <= 0.0:
 		_advance()
 

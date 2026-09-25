@@ -13,14 +13,9 @@ extends GameState
 ## Emitted every frame with the seconds left in the buy window.
 signal countdown_updated(remaining: float)
 
-## Seconds before combat begins.
-var duration: float = 3.0
-
-var _remaining: float = 0.0
-
 
 func enter(_previous: GameState) -> void:
-	_remaining = duration
+	_start_countdown(get_rules().round_start_seconds)
 
 	var match_data := get_match()
 	match_data.start_round()
@@ -28,12 +23,7 @@ func enter(_previous: GameState) -> void:
 	countdown_updated.emit(_remaining)
 
 
-func exit(_next_state: GameState) -> void:
-	_remaining = 0.0
-
-
 func update(delta: float) -> void:
-	_remaining -= delta
-	countdown_updated.emit(maxf(_remaining, 0.0))
+	countdown_updated.emit(_tick_countdown(delta))
 	if _remaining <= 0.0:
 		request_state(GamePhase.Phase.ROUND_ACTIVE)

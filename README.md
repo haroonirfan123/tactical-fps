@@ -2,8 +2,9 @@
 
 An original 3v3 tactical first-person shooter built in Godot.
 
-> **Status: Chapter 2 — Core Architecture.**
-> The project structure and the game state machine exist and run. There is no
+> **Status: Chapter 1 complete.**
+> The project structure, phase state machine, data resources, boot scene and
+> debug overlay all exist, run, and pass a full validation pass. There is no
 > player, weapon or HUD yet. See [Roadmap](#roadmap) for what comes next.
 
 ---
@@ -18,6 +19,14 @@ An original 3v3 tactical first-person shooter built in Godot.
 
 These three are already configured in `project.godot`. Do not switch renderer or
 physics engine later — it invalidates baked lighting and physics tuning.
+
+> **On the engine version.** The brief specified Godot 4.5; the editor installed
+> here is 4.7.2, so that is what everything was built and verified against. The
+> code sticks to APIs that already existed in 4.5 — `Node`, `Resource`,
+> `ENetMultiplayerPeer`, `@export`, typed signals, `DirAccess`, `CanvasLayer` —
+> and deliberately uses no 4.6/4.7-only feature, so the sources should open in
+> 4.5. That has **not** been proven by running 4.5, so if 4.5 is a hard
+> requirement, open the project in 4.5 once before starting Chapter 2.
 
 ---
 
@@ -35,6 +44,7 @@ res://
 ├── icon.svg               # Window icon
 │
 ├── data/                  # Designer-editable .tres data (see below)
+│   ├── match_rules.tres   # Rounds, phase lengths, players per team
 │   └── weapons/           # Weapon stat tables
 │
 ├── scenes/                # .tscn files, mirrored from scripts/
@@ -44,14 +54,16 @@ res://
 │   ├── player/            # Player, camera, weapon holder
 │   ├── weapons/           # Weapon scenes
 │   └── ui/                # HUD, scoreboard, menus
+│                      #   + dev_overlay.tscn (temporary, see Debug overlay)
 │
 ├── scripts/               # All .gd files
 │   ├── core/              # Cross-cutting: EventBus, GameConfig, boot screen
-│   ├── game/              # GameManager, GameState, MatchState, phases
+│   ├── game/              # GameManager, GameState, MatchState, MatchRules
 │   │   └── states/        # One file per phase - see Architecture
 │   ├── network/           # Multiplayer / netcode
 │   ├── player/            # Player controller, camera, movement
 │   ├── ui/                # HUD and menu logic
+│   │   └── dev_overlay.gd # Debug readout (temporary)
 │   └── weapons/           # Weapon behaviour, ballistics, damage
 │
 └── assets/                # All non-code content
@@ -108,14 +120,21 @@ That distinction is the whole design:
 | Class | Base | Changes at runtime? | Holds |
 | --- | --- | --- | --- |
 | `WeaponData` | `Resource` | No — authored, saved as `.tres` | Damage, fire rate, magazine, price |
+| `MatchRules` | `Resource` | No — authored, saved as `.tres` | Round length, rounds to win, team size |
 | `PlayerState` | `RefCounted` | Yes | Health, team, alive, K/D/A |
 | `MatchState` | `RefCounted` | Yes | Round number, scores, winner |
 | `Team` | `RefCounted` | No | The `Side` enum and helpers |
 
-`WeaponData` is a `Resource` because its values are authored in the Inspector
-and saved to disk, and one instance is shared by every player using that
-weapon. The other three are `RefCounted` because they are live state that
-changes as the game runs, and each needs its own instance.
+`WeaponData` and `MatchRules` are `Resource`s because their values are authored
+in the Inspector, saved to disk, and shared. The other three are `RefCounted`
+because they are live state that changes as the game runs, and each needs its
+own instance.
+
+**Tunables live in `data/`, not in code.** Phase lengths, rounds-to-win and
+players-per-team are all fields on `MatchRules` in
+`data/match_rules.tres`. Retuning a match is a data edit. "3v3" in particular
+is stated exactly once — `NetworkManager.get_max_players()` derives the
+session cap from `players_per_team`, so the two can never drift apart.
 
 **`load()` is cached — weapon stats are shared, not copied.** Every player
 holding the same weapon gets the *same* `WeaponData` object. Writing
@@ -140,14 +159,20 @@ The main scene is `scenes/core/main.tscn`, so **F5** runs the game. It boots
 into the main menu, where you can host or join a session. **Host game** on one
 instance and **Join game** on a second to see the network layer work.
 
-From the lobby, the dev harness appears. It shows the current phase and offers
-a button for every legal next phase, so you can walk the whole match flow by
-hand without waiting on timers.
+Once you leave the title screen, the **debug overlay** appears down the right
+side. It shows the current game state, which screen is currently routed in, the
+live match rules, the score, and whether networking is active. It also offers a
+button for every legal next phase, so you can walk the whole match flow by hand
+without waiting on timers.
 
-Behind the harness is a grey-box arena — a walled floor, a large apron of
+Behind the overlay is a grey-box arena — a walled floor, a large apron of
 surrounding ground, some cover, a sky and a fixed overview camera. It exists
 purely to prove the project renders, lights and simulates. There is no player
 in it; nothing moves. Chapter 7 replaces it with the real map.
+
+**There is still no playable game here.** No controller, no input actions, no
+weapons, no combat — all of that starts in Chapter 2. What works today is the
+foundation: the phase machine, the routing, the data, the network session.
 
 ---
 
@@ -216,16 +241,23 @@ they do not each need a reference to whatever raised the event. If exactly one
 system cares, that system should just call the other one directly. `EventBus`
 is not a dumping ground — if you add a signal nobody listens to, delete it.
 
-### A note on the dev harness and the grey box
+### The debug overlay and the grey box
 
 `scenes/core/main.tscn` is the permanent root: screens are swapped in and out
 as its children, never by replacing it. Routing has to outlive whatever it
 routes to — a router that swapped itself out would leave nothing to handle the
 next phase change.
 
-Its panel is a development harness, not a menu. It exists so the state machine
-can be driven before there is a player or a HUD. Chapter 8 replaces it; nothing
-should come to depend on it.
+`scenes/ui/dev_overlay.tscn` is the debug overlay shown once you leave the
+title screen. It reports the current game state, the scene currently routed
+to, whether networking is active, the live match rules and the score, plus
+buttons that force the state machine into any legal phase.
+
+**It is disposable, and deliberately isolated so that removing it is trivial.**
+Either set `Main.DEV_OVERLAY_ENABLED` to `false`, or delete the two
+`dev_overlay` files and the four lines in `main.gd` that reference them. Nothing
+in the permanent router depends on it, and nothing outside its own script should
+ever come to depend on it. Chapter 8 replaces it with a real HUD.
 
 `scenes/game/placeholder_environment.tscn` is the grey box behind it, and is
 equally disposable — Chapter 7 replaces it. It is a separate scene rather than
@@ -234,14 +266,14 @@ unpicking nodes out of the router.
 
 Within that scene the split is deliberate:
 
-- **Authored in the `.tscn`** — sky, sun, camera, floor, walls. These are things
-  you want to click and adjust in the Inspector.
+- **Authored in the `.tscn`** — sky, sun, camera, apron, floor, walls. These are
+  things you want to click and adjust in the Inspector.
 - **Generated in the script** — the eight cover blocks. They are near-identical,
   and a loop is a better home for them than a dozen copy-pasted nodes that all
   have to be deleted again in Chapter 7.
 
 Two things are easy to get wrong in a placeholder and are worth doing properly
-now rather than rediscovering in Chapter 3:
+now rather than rediscovering in Chapter 2:
 
 - **Every visible box has a matching `CollisionShape3D` sized separately from
   its `BoxMesh`.** Editing the mesh to look right should never silently change
@@ -249,15 +281,18 @@ now rather than rediscovering in Chapter 3:
 - **Both spawn points already exist as `Marker3D`s** (`AlphaSpawn`, `BravoSpawn`),
   so Chapter 4 can assign teams without this scene having to change.
 
+The floor's top surface sits at exactly `y = 0`, which is where Chapter 2's
+player controller is written to expect solid ground.
+
 ---
 
 ## Roadmap
 
-Each chapter builds on the last. This foundation is Chapter 1.
+Each chapter builds on the last.
 
-- [x] **Ch. 1 — Foundation:** project structure, conventions, version control
-- [x] **Ch. 2 — Core architecture:** phase state machine, autoloads, data
-      classes, boot scene
+- [x] **Ch. 1 — Foundation:** project structure, conventions, version control,
+      phase state machine, autoloads, data resources, boot scene, debug overlay
+- [ ] **Ch. 2 — Player controller & input:** input map, movement, camera, collision
 - [ ] **Ch. 3 — Weapons & combat:** firing, ballistics, damage, hit feedback
 - [ ] **Ch. 4 — Multiplayer:** player replication, teams, lobby, sync
 - [ ] **Ch. 5 — Round system:** buy phase, live round, score, win conditions
@@ -266,11 +301,13 @@ Each chapter builds on the last. This foundation is Chapter 1.
 - [ ] **Ch. 8 — UI, art & audio:** HUD, menus, identity, VFX, sound
 - [ ] **Ch. 9 — Testing & ship:** optimisation, balance, final export build
 
-### Carried forward from Chapter 2
+### Carried forward from Chapter 1
 
 Deliberately left out, so later chapters do not have to unpick them:
 
-- **No player controller, camera or input actions.** Chapter 3's job.
+- **No player controller, camera or input actions.** Chapter 2's job — the next
+  thing to build. The grey box already has real collision and a floor whose top
+  surface sits at exactly `y = 0`, so there is something to walk on and into.
 - **No replication.** `NetworkManager` covers session setup and peer
   bookkeeping only — no player spawning, ownership or authority. Chapter 4's
   job, and a clean gap is much easier to fill than half-built replication.

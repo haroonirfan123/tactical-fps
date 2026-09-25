@@ -32,6 +32,18 @@ extends RefCounted
 ## a properly typed result so nothing downstream has to care.
 var game_manager
 
+## Seconds left on this state's countdown, or 0 for states that are not timed.
+##
+## Every timed phase used to declare its own copy of this alongside its own
+## copy of the decrement-and-check loop. That is four copies of the same five
+## lines, and a bug fixed in one of them would have left the other three
+## quietly wrong. The countdown lives here instead; subclasses call
+## [method _start_countdown] and [method _tick_countdown].
+##
+## No [method exit] reset is needed. [GameManager] builds a fresh state object
+## on every transition, so this always starts at zero for a new phase.
+var _remaining: float = 0.0
+
 
 func _init(manager = null) -> void:
 	game_manager = manager
@@ -63,6 +75,30 @@ func update(_delta: float) -> void:
 ## the untyped [member game_manager] is reached through in exactly one place.
 func get_match() -> MatchState:
 	return game_manager.match_state as MatchState
+
+
+## The rules for the match in progress - round length, buy window, rounds to
+## win. Phases read their duration from here rather than hard-coding it, so
+## retuning a match is an edit to [code]data/match_rules.tres[/code].
+func get_rules() -> MatchRules:
+	return game_manager.match_rules as MatchRules
+
+
+# --- Countdown helpers ----------------------------------------------------
+# Shared by every timed phase. A timed state is then three lines in
+# [method enter] and three in [method update], with no bookkeeping of its own.
+
+## Arms the countdown for [param seconds]. Call from [method enter].
+func _start_countdown(seconds: float) -> void:
+	_remaining = maxf(seconds, 0.0)
+
+
+## Advances the countdown by [param delta] and returns the time left, which
+## never goes below zero. Call from [method update], then compare
+## [member _remaining] against zero to detect the frame the phase should end.
+func _tick_countdown(delta: float) -> float:
+	_remaining = maxf(_remaining - delta, 0.0)
+	return _remaining
 
 
 ## Asks [GameManager] to move to [param phase]. Always go through this rather

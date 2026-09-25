@@ -11,8 +11,11 @@ extends RefCounted
 ## This holds no nodes and no scene references, which keeps it trivial to
 ## replicate over the network in Chapter 4.
 
-## Round wins needed to take the match. First to five.
-const ROUNDS_TO_WIN := 5
+## The rules this match is being played under. Supplied by [GameManager] when
+## the match is created. Held rather than read from a constant so that when a
+## dedicated server becomes authoritative, the rules it owns are the same
+## values every client scores against.
+var rules: MatchRules
 
 ## Which round we are on. Incremented by [method start_round], so it is 0
 ## until the first [b]ROUND_START[/b].
@@ -28,7 +31,10 @@ var winning_team: int = Team.Side.NONE
 var _scores: Dictionary = {}
 
 
-func _init() -> void:
+func _init(match_rules: MatchRules = null) -> void:
+	# Optional so a bare MatchState.new() still works in a test, falling back
+	# to the defaults rather than crashing on a null rules reference.
+	rules = match_rules if match_rules != null else MatchRules.new()
 	reset()
 
 
@@ -64,7 +70,7 @@ func start_round() -> void:
 ## Credits a round win. Returns true if it also won the match.
 func add_round_win(team: int) -> bool:
 	_scores[team] = get_score(team) + 1
-	if _scores[team] >= ROUNDS_TO_WIN:
+	if _scores[team] >= rules.rounds_to_win:
 		winning_team = team
 		return true
 	return false

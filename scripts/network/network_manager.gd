@@ -42,9 +42,11 @@ const DEFAULT_PORT := 27015
 ## Loopback, for testing two instances on one machine.
 const DEFAULT_ADDRESS := "127.0.0.1"
 
-## Six players: three a side. A 3v3 game that allowed a seventh connection
-## would have nowhere sensible to put them.
-const MAX_PLAYERS := 6
+## Hard ceiling on a session, whatever the rules ask for. A mistyped
+## [code]match_rules.tres[/code] should not be able to open a server for a
+## thousand players. This is a transport safety limit, not a game rule - the
+## actual cap comes from [method get_max_players].
+const ABSOLUTE_MAX_PLAYERS := 16
 
 var _peer: ENetMultiplayerPeer = null
 var _is_online: bool = false
@@ -86,27 +88,38 @@ func get_connected_peers() -> PackedInt32Array:
 	return multiplayer.get_peers()
 
 
-## Total connected players, including us. Capped at [constant MAX_PLAYERS] by
-## ENet, so this can be trusted as a player count.
+## Session size implied by the match rules: two teams of
+## [member MatchRules.players_per_team]. "3v3" is therefore stated once, in
+## [code]data/match_rules.tres[/code], rather than as a 6 here and a 3 there.
+## Clamped so a bad rules file cannot produce an absurd session.
+func get_max_players() -> int:
+	return clampi(GameManager.match_rules.get_team_size(), 2, ABSOLUTE_MAX_PLAYERS)
+
+
+## Total connected players, including us. Capped by ENet to whatever was passed
+## to [method host_game], so this can be trusted as a player count.
 func get_player_count() -> int:
 	return get_connected_peers().size()
 
 
 ## Whether the session has room for another player.
 func has_open_slot() -> bool:
-	return get_player_count() < MAX_PLAYERS
+	return get_player_count() < get_max_players()
 
 
 # --- Session control ----------------------------------------------------
 
 ## Starts a server and waits for players to connect.
+## [param max_players] of 0 means "use the session size from the match rules".
 ## Returns [constant OK] on success, or an [enum Error] to pass to
 ## [method @GlobalScope.error_string].
-func host_game(port: int = DEFAULT_PORT, max_players: int = MAX_PLAYERS) -> Error:
+func host_game(port: int = DEFAULT_PORT, max_players: int = 0) -> Error:
 	leave_game()
 
+	var cap := mini(max_players if max_players > 0 else get_max_players(), ABSOLUTE_MAX_PLAYERS)
+
 	var peer := ENetMultiplayerPeer.new()
-	var error := peer.create_server(port, mini(max_players, MAX_PLAYERS))
+	var error := peer.create_server(port, cap)
 	if error != OK:
 		push_error("NetworkManager: could not host on port %d (%s)" % [port, error_string(error)])
 		return error
@@ -116,7 +129,7 @@ func host_game(port: int = DEFAULT_PORT, max_players: int = MAX_PLAYERS) -> Erro
 	_is_online = true
 	_is_host = true
 
-	print("[Network] Hosting on port %d for up to %d players" % [port, max_players])
+	print("[Network] Hosting on port %d for up to %d players" % [port, cap])
 	hosting_started.emit(port)
 	return OK
 
