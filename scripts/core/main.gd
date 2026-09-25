@@ -62,7 +62,7 @@ const SCREENS := {
 	GamePhase.Phase.MAIN_MENU: preload("res://scenes/ui/main_menu.tscn"),
 	GamePhase.Phase.LOBBY: preload("res://scenes/game/playtest.tscn"),
 	GamePhase.Phase.WARMUP: preload("res://scenes/game/playtest.tscn"),
-	GamePhase.Phase.ROUND_START: preload("res://scenes/game/playtest.tscn"),
+	GamePhase.Phase.BUY: preload("res://scenes/game/playtest.tscn"),
 	GamePhase.Phase.ROUND_ACTIVE: preload("res://scenes/game/playtest.tscn"),
 	GamePhase.Phase.ROUND_END: preload("res://scenes/game/playtest.tscn"),
 }

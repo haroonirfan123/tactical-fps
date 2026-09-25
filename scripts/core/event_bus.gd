@@ -36,7 +36,7 @@ signal ability_used(user_id: int, ability_id: StringName)
 
 # --- Match flow ---------------------------------------------------------
 
-## A round is being set up. This fires at [b]ROUND_START[/b], not when combat
+## A round is being set up. This fires at [b]BUY[/b], not when combat
 ## actually begins.
 signal round_started(round_number: int)
 

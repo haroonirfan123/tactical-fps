@@ -388,6 +388,7 @@ const VIEWMODEL_KICK_RECOVERY := 12.0
 @onready var _hit_marker: HitMarker = $HitMarkerLayer/HitMarker
 @onready var _transform_sync: MultiplayerSynchronizer = $TransformSync
 
+
 ## Optional translucent capsule used only to make the collider visible while
 ## developing, and permanently visible for a body this machine is not driving.
 ## Hidden by default, and parented to the collision shape so it can never drift
@@ -1226,6 +1227,15 @@ func _begin_death_presentation(source: Node) -> void:
 		_apply_team_colour()
 	if weapon != null:
 		weapon.cancel_reload()
+
+	# Offline quality-of-life: auto-respawn after a short delay so the
+	# playtest loop doesn't leave you staring at a corpse forever. The real
+	# round system (Chapter 5) will own when respawns happen; this is only
+	# for the Chapter 3/4 offline test arena.
+	if not NetworkManager.is_online:
+		await get_tree().create_timer(3.0).timeout
+		if _is_dying:  # Still dead? (Player might have disconnected)
+			respawn()
 
 
 ## Puts the player back on their feet with a full magazine. Used by the test

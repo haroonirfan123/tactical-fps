@@ -3,7 +3,7 @@ extends RefCounted
 ## The high-level phases a session moves through, in order:
 ##
 ## [codeblock]
-## MAIN_MENU -> LOBBY -> WARMUP -> ROUND_START -> ROUND_ACTIVE
+## MAIN_MENU -> LOBBY -> WARMUP -> BUY -> ROUND_ACTIVE
 ##                                        ^                    |
 ##                                        +---- ROUND_END <-----+
 ##                                             |         |
@@ -21,7 +21,7 @@ enum Phase {
 	MAIN_MENU,    ## Title screen. Nothing loaded, nobody connected.
 	LOBBY,        ## Players are connected and waiting for the host.
 	WARMUP,       ## One-off countdown before the very first round.
-	ROUND_START,  ## Freeze / buy window at the start of each round.
+	BUY,          ## Preparation / buy window at the start of each round.
 	ROUND_ACTIVE, ## Live combat.
 	ROUND_END,    ## Post-round pause showing who won.
 	MATCH_END,    ## Someone has won the match.

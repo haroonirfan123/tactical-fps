@@ -58,7 +58,7 @@ const STATE_SCRIPTS := {
 	GamePhase.Phase.MAIN_MENU: preload("res://scripts/game/states/main_menu_state.gd"),
 	GamePhase.Phase.LOBBY: preload("res://scripts/game/states/lobby_state.gd"),
 	GamePhase.Phase.WARMUP: preload("res://scripts/game/states/warmup_state.gd"),
-	GamePhase.Phase.ROUND_START: preload("res://scripts/game/states/round_start_state.gd"),
+	GamePhase.Phase.BUY: preload("res://scripts/game/states/buy_state.gd"),
 	GamePhase.Phase.ROUND_ACTIVE: preload("res://scripts/game/states/round_active_state.gd"),
 	GamePhase.Phase.ROUND_END: preload("res://scripts/game/states/round_end_state.gd"),
 	GamePhase.Phase.MATCH_END: preload("res://scripts/game/states/match_end_state.gd"),
@@ -79,13 +79,13 @@ const ALLOWED_TRANSITIONS := {
 	],
 
 	GamePhase.Phase.WARMUP: [
-		GamePhase.Phase.ROUND_START,
+		GamePhase.Phase.BUY,
 		GamePhase.Phase.MATCH_END,
 	],
 
-	# ROUND_START always becomes live combat. Ending early is for admin
+	# BUY / PREPARATION always becomes live combat. Ending early is for admin
 	# (someone left, a host gave up), not for a normal round.
-	GamePhase.Phase.ROUND_START: [
+	GamePhase.Phase.BUY: [
 		GamePhase.Phase.ROUND_ACTIVE,
 		GamePhase.Phase.MATCH_END,
 	],
@@ -95,11 +95,10 @@ const ALLOWED_TRANSITIONS := {
 		GamePhase.Phase.MATCH_END,
 	],
 
-	# The normal loop: back to ROUND_START for the next round, or out to the
-	# match result. ROUND_START -> WARMUP is deliberately absent - warm-up is
-	# a once-per-match thing, not a between-rounds thing.
+	# The normal loop: back to BUY for the next round, or out to the
+	# match result.
 	GamePhase.Phase.ROUND_END: [
-		GamePhase.Phase.ROUND_START,
+		GamePhase.Phase.BUY,
 		GamePhase.Phase.MATCH_END,
 	],
 

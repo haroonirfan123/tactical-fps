@@ -21,7 +21,7 @@ const PHASE_NOTES := {
 	GamePhase.Phase.MAIN_MENU: "Nobody connected, nothing loaded. This is the only phase you start in.",
 	GamePhase.Phase.LOBBY: "A fresh match. Peers show up here; the host starts the warm-up. Chapter 2 shows the playable playtest in this phase.",
 	GamePhase.Phase.WARMUP: "One-off countdown before the very first round. Only runs once per match.",
-	GamePhase.Phase.ROUND_START: "Freeze / buy window. The round counter ticks up here, not when combat starts.",
+	GamePhase.Phase.BUY: "Freeze / buy window. The round counter ticks up here, not when combat starts.",
 	GamePhase.Phase.ROUND_ACTIVE: "Live round. Weapons and damage arrive in Chapter 3.",
 	GamePhase.Phase.ROUND_END: "Round resolved: score credited, then next round or the match result.",
 	GamePhase.Phase.MATCH_END: "Match won. Stays here until someone picks a rematch or quits.",

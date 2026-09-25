@@ -18,7 +18,7 @@ extends RefCounted
 var rules: MatchRules
 
 ## Which round we are on. Incremented by [method start_round], so it is 0
-## until the first [b]ROUND_START[/b].
+## until the first [b]BUY[/b].
 var round_number: int = 0
 
 ## Winner of the most recent round, or [constant Team.Side.NONE] if it ended
@@ -62,7 +62,7 @@ func get_leading_team() -> int:
 	return Team.Side.ALPHA if alpha > bravo else Team.Side.BRAVO
 
 
-## Called at the start of each round, by [b]ROUND_START[/b].
+## Called at the start of each round, by [b]BUY[/b].
 func start_round() -> void:
 	round_number += 1
 

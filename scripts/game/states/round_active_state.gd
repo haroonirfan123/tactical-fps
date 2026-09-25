@@ -32,3 +32,7 @@ func update(delta: float) -> void:
 func end_round(winner: int) -> bool:
 	get_match().last_round_winner = winner
 	return request_state(GamePhase.Phase.ROUND_END)
+
+
+func exit(_next_state: GameState) -> void:
+	pass

@@ -38,4 +38,4 @@ func _advance() -> void:
 	if match_data.is_match_over():
 		request_state(GamePhase.Phase.MATCH_END)
 	else:
-		request_state(GamePhase.Phase.ROUND_START)
+		request_state(GamePhase.Phase.BUY)

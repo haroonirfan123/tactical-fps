@@ -3,7 +3,7 @@ extends GameState
 ## players have a moment to load in and get their bearings.
 ##
 ## This only ever runs once per match. Every round after the first goes
-## [b]ROUND_END[/b] -> [b]ROUND_START[/b] directly.
+## [b]ROUND_END[/b] -> [b]BUY[/b] directly.
 ##
 ## Because it is a timed state it exposes [signal countdown_updated] rather
 ## than making the UI poll it. That is the pattern every timed phase here
@@ -23,4 +23,4 @@ func enter(_previous: GameState) -> void:
 func update(delta: float) -> void:
 	countdown_updated.emit(_tick_countdown(delta))
 	if _remaining <= 0.0:
-		request_state(GamePhase.Phase.ROUND_START)
+		request_state(GamePhase.Phase.BUY)
